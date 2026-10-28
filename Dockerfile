@@ -50,19 +50,9 @@ COPY --from=frontend-builder /build/frontend/dist ./frontend/dist
 # Expose web port (Render sets $PORT dynamically)
 EXPOSE 5000
 
-# Create lightweight production entrypoint script
-RUN echo '#!/bin/sh\n\
-echo "Starting Python RAG AI Bridge on port 5001..."\n\
-python python_bridge.py &\n\
-PY_PID=$!\n\
-\n\
-echo "Starting Node.js Express server on port ${PORT:-5000}..."\n\
-node backend/src/server.js &\n\
-NODE_PID=$!\n\
-\n\
-trap "kill $PY_PID $NODE_PID" SIGTERM SIGINT\n\
-wait -n\n\
-' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+# Copy and configure entrypoint script
+COPY entrypoint.sh /app/entrypoint.sh
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
-CMD ["/app/entrypoint.sh"]
+CMD ["/bin/bash", "/app/entrypoint.sh"]
 
