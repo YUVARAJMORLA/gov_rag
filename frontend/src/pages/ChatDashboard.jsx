@@ -143,47 +143,6 @@ export const ChatDashboard = ({ onNavigate }) => {
   const [isHandsFreeActive, setIsHandsFreeActive] = useState(false);
   const handsFreeActiveRef = useRef(false);
 
-  // Curated quick voice queries per language for instant testing even behind corporate proxies
-  const sampleVoicePrompts = {
-    te: [
-      { label: 'పీఎం కిసాన్ డాక్యుమెంట్లు', text: 'పీఎం కిసాన్ స్కీం కి ఏమేమి డాక్యుమెంట్లు కావాలి' },
-      { label: 'పీఎం జేజేబీవై ప్రయోజనాలు', text: 'పీఎం జేజేబీవై పథకం ప్రయోజనాలు ఏమిటి ఎలా దరఖాస్తు చేసుకోవాలి' },
-      { label: 'బేటీ బచావో బేటీ పఢావో పథకం', text: 'బేటీ బచావో బేటీ పఢావో పథకం ప్రయోజనాలు మరియు వివరాలు ఏమిటి' }
-    ],
-    hi: [
-      { label: 'पीएम किसान दस्तावेज', text: 'पीएम किसान योजना के लिए कौन से दस्तावेज चाहिए' },
-      { label: 'पीएम जीवन ज्योति बीमा', text: 'पीएम जीवन ज्योति बीमा योजना के क्या लाभ हैं और कैसे आवेदन करें' },
-      { label: 'बेटी बचाओ बेटी पढ़ाओ योजना', text: 'बेटी बचाओ बेटी पढ़ाओ योजना के मुख्य उद्देश्य और लाभ क्या हैं' }
-    ],
-    en: [
-      { label: 'PMJJBY Benefits & Apply', text: 'what are the benifits of pmjjby scheme how to apply for it' },
-      { label: 'PM-KISAN Documents', text: 'what documents are required for PM-KISAN scheme' },
-      { label: 'Beti Bachao Beti Padhao Scheme', text: 'what are the benefits and objectives of beti bachao beti padhao scheme' }
-    ]
-  };
-
-  // Quick Voice Simulation handler (transcribes, auto-sends if Auto-Send is ON, otherwise fills chatbox)
-  const handleQuickVoiceTest = (simulatedText) => {
-    setInputText(simulatedText);
-
-    if (autoSendVoice) {
-      setInterimText(simulatedText);
-      setVoiceStatusNotice(`🎙️ Voice captured: "${simulatedText}" — Querying schemes...`);
-      setTimeout(() => {
-        setInterimText('');
-        handleSendMessage(simulatedText, true);
-      }, 450);
-    } else {
-      setVoiceStatusNotice(
-        targetLanguage === 'hi'
-          ? `🎙️ प्रश्न चैटबॉक्स में आ गया है: "${simulatedText}" — भेजने से पहले जांचें या एडिट करें।`
-          : (targetLanguage === 'te'
-            ? `🎙️ ప్రశ్న చాట్‌బాక్స్‌లో నింపబడింది: "${simulatedText}" — పంపే ముందు పరిశీలించండి.`
-            : `🎙️ Voice question loaded into chatbox. Review or edit before sending.`)
-      );
-    }
-  };
-
   // Available Speech Synthesis Voices (Male and Female)
   const [voiceList, setVoiceList] = useState([]);
   const [selectedVoiceId, setSelectedVoiceId] = useState('');
@@ -646,7 +605,7 @@ export const ChatDashboard = ({ onNavigate }) => {
         console.warn('Continuous voice error:', err);
         setIsListening(false);
         if (err === 'network') {
-          setVoiceStatusNotice('🎙️ Voice recognition network pause. Speak again or tap a Quick Voice Prompt.');
+          setVoiceStatusNotice('🎙️ Voice recognition network pause. Please speak again.');
           setTimeout(() => setVoiceStatusNotice(''), 3500);
           if (handsFreeActiveRef.current) {
             setTimeout(() => {
@@ -779,7 +738,7 @@ export const ChatDashboard = ({ onNavigate }) => {
         setIsListening(false);
         setInterimText('');
         if (err === 'network') {
-          setVoiceStatusNotice('🎙️ Voice recognition network pause. Speak again or use Quick Voice Prompts.');
+          setVoiceStatusNotice('🎙️ Voice recognition network pause. Click mic to speak again.');
         } else if (err === 'not-allowed') {
           setVoiceStatusNotice('⚠️ Microphone access denied in browser permissions. Please allow mic in browser settings.');
         } else if (err === 'no-speech') {
@@ -1926,42 +1885,6 @@ export const ChatDashboard = ({ onNavigate }) => {
               </button>
             </div>
           )}
-
-          {/* Quick Voice Simulation / One-Click Voice Testing Chips */}
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            marginBottom: '10px',
-            flexWrap: 'wrap'
-          }}>
-            <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: 600 }}>
-              🎙️ {targetLanguage === 'te' ? 'వాయిస్ ప్రశ్నలు:' : (targetLanguage === 'hi' ? 'त्वरित वॉयस प्रश्न:' : 'Quick Voice Prompts:')}
-            </span>
-            {(sampleVoicePrompts[targetLanguage] || sampleVoicePrompts.en).map((q, idx) => (
-              <button
-                key={idx}
-                type="button"
-                onClick={() => handleQuickVoiceTest(q.text)}
-                style={{
-                  padding: '3px 10px',
-                  fontSize: '11px',
-                  borderRadius: '6px',
-                  background: 'rgba(30, 41, 59, 0.75)',
-                  border: '1px solid var(--border-medium)',
-                  color: '#e2e8f0',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  transition: 'all 0.15s ease'
-                }}
-              >
-                <span>🗣️</span>
-                <span>{q.label}</span>
-              </button>
-            ))}
-          </div>
 
           <form
             onSubmit={(e) => {
