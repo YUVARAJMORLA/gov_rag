@@ -436,8 +436,8 @@ export class VoiceAssistant {
     }
   }
 
-  // 3. Play base64 audio stream with session token to prevent overlapping
-  playAudioBase64(base64Data, onStart, onEnd, sessionId = null) {
+  // 3. Play base64 audio stream with session token and automatic speech synthesis fallback
+  playAudioBase64(base64Data, onStart, onEnd, sessionId = null, fallbackText = null, voiceParams = {}) {
     const activeSession = sessionId || ++this.speechSessionId;
     this.speechSessionId = activeSession;
 
@@ -485,6 +485,12 @@ export class VoiceAssistant {
       audio.onended = triggerEnd;
       audio.onerror = (e) => {
         console.warn('Audio playback notice:', e);
+        if (fallbackText && this.speechSessionId === activeSession) {
+          try {
+            this.speak(fallbackText, onStart, onEnd, voiceParams.preferredVoiceId, voiceParams.isNovaSonic, voiceParams.lang, activeSession);
+            return;
+          } catch (_) {}
+        }
         triggerEnd();
       };
 
@@ -492,38 +498,26 @@ export class VoiceAssistant {
       if (playPromise !== undefined) {
         playPromise.catch((err) => {
           console.warn('Audio play notice (interaction or format):', err);
+          if (fallbackText && this.speechSessionId === activeSession) {
+            try {
+              this.speak(fallbackText, onStart, onEnd, voiceParams.preferredVoiceId, voiceParams.isNovaSonic, voiceParams.lang, activeSession);
+              return;
+            } catch (_) {}
+          }
           triggerEnd();
         });
       }
       return audio;
     } catch (e) {
       console.warn('Failed to play audio:', e);
+      if (fallbackText && this.speechSessionId === activeSession) {
+        try {
+          this.speak(fallbackText, onStart, onEnd, voiceParams.preferredVoiceId, voiceParams.isNovaSonic, voiceParams.lang, activeSession);
+          return;
+        } catch (_) {}
+      }
       if (onEnd) onEnd();
     }
-  }
-
-  // Helper to extract a natural concise excerpt (< 420 chars) at a complete sentence boundary for rapid speech (< 1.5s)
-  extractSpeechExcerpt(text, lang = 'en', maxChars = 420) {
-    if (!text) return '';
-    const clean = this.cleanTextForSpeech(text, lang);
-    if (clean.length <= maxChars) return clean;
-
-    const boundaryMarkers = ['. ', '! ', '? ', '। ', '\n', '; '];
-    let bestPos = -1;
-    for (const b of boundaryMarkers) {
-      const pos = clean.lastIndexOf(b, maxChars);
-      if (pos > 180 && pos > bestPos) {
-        bestPos = pos + (b === '\n' ? 0 : b.length);
-      }
-    }
-    if (bestPos > 180) {
-      return clean.substring(0, bestPos).trim();
-    }
-    const spacePos = clean.lastIndexOf(' ', maxChars);
-    if (spacePos > 200) {
-      return clean.substring(0, spacePos).trim() + (lang === 'hi' ? '।' : '.');
-    }
-    return clean.substring(0, maxChars).trim() + (lang === 'hi' ? '।' : '.');
   }
 
   // 4. Universal Multilingual Speak (Uses High-Quality Neural Voices for Telugu, Hindi, Nova Sonic)
@@ -544,11 +538,6 @@ export class VoiceAssistant {
       return;
     }
 
-    // A. If pre-synthesized base64 audio is already available, play immediately (zero network delay)
-    if (audioBase64) {
-      return this.playAudioBase64(audioBase64, onStart, onEnd, mySessionId);
-    }
-
     const lang = targetLanguage || this.currentLanguage || 'en';
     const voiceId = preferredVoiceId || this.getSelectedVoice();
     const isNeural =
@@ -557,27 +546,33 @@ export class VoiceAssistant {
       isNovaSonic ||
       (voiceId && (voiceId.includes('neural') || voiceId.includes('nova')));
 
-    // Use fast concise conversational excerpt (< 420 chars) to prevent 15-20s synthesis delays
-    const spokenExcerpt = this.extractSpeechExcerpt(text, lang);
+    // Clean full text for natural pronunciation across all paragraphs
+    const cleanedText = this.cleanTextForSpeech(text, lang);
+    const voiceParams = { preferredVoiceId: voiceId, isNovaSonic, lang };
+
+    // A. If pre-synthesized base64 audio is already available, play immediately (zero network delay)
+    if (audioBase64) {
+      return this.playAudioBase64(audioBase64, onStart, onEnd, mySessionId, cleanedText, voiceParams);
+    }
 
     // B. If Neural voice (Telugu, Hindi, Nova Sonic, or Indian English), fetch studio-grade audio from backend
     if (isNeural) {
-      const cacheKey = `${lang}_${voiceId}_${spokenExcerpt.substring(0, 60)}_${spokenExcerpt.length}`;
+      const cacheKey = `${lang}_${voiceId}_${cleanedText.substring(0, 60)}_${cleanedText.length}`;
       if (this.audioCache.has(cacheKey)) {
         if (this.speechSessionId !== mySessionId) return;
-        return this.playAudioBase64(this.audioCache.get(cacheKey), onStart, onEnd, mySessionId);
+        return this.playAudioBase64(this.audioCache.get(cacheKey), onStart, onEnd, mySessionId, cleanedText, voiceParams);
       }
 
       const gender = (voiceId && (voiceId.includes('mohan') || voiceId.includes('madhur') || voiceId.includes('prabhat') || voiceId.includes('male'))) ? 'Male' : 'Female';
 
       try {
-        const res = await chatAPI.synthesizeSpeech(spokenExcerpt, lang, gender, isNovaSonic);
+        const res = await chatAPI.synthesizeSpeech(cleanedText, lang, gender, isNovaSonic);
         // MUTEX CHECK: If user clicked Listen again or switched while awaiting, DO NOT PLAY
         if (this.speechSessionId !== mySessionId) return;
 
         if (res.data?.success && res.data.audioBase64) {
           this.audioCache.set(cacheKey, res.data.audioBase64);
-          return this.playAudioBase64(res.data.audioBase64, onStart, onEnd, mySessionId);
+          return this.playAudioBase64(res.data.audioBase64, onStart, onEnd, mySessionId, cleanedText, voiceParams);
         }
       } catch (err) {
         console.warn('Backend neural TTS synthesis notice:', err.message);
@@ -589,14 +584,14 @@ export class VoiceAssistant {
 
     // C. Fallback: Browser Web Speech API with automatic backend fallback on failure
     try {
-      this.speak(spokenExcerpt, onStart, onEnd, voiceId, isNovaSonic, lang, mySessionId);
+      this.speak(cleanedText, onStart, onEnd, voiceId, isNovaSonic, lang, mySessionId);
     } catch (_fallbackErr) {
       const fallbackGender = (voiceId && (voiceId.includes('prabhat') || voiceId.includes('male'))) ? 'Male' : 'Female';
-      chatAPI.synthesizeSpeech(spokenExcerpt, lang, fallbackGender, false)
+      chatAPI.synthesizeSpeech(cleanedText, lang, fallbackGender, false)
         .then((res) => {
           if (this.speechSessionId !== mySessionId) return;
           if (res.data?.success && res.data.audioBase64) {
-            this.playAudioBase64(res.data.audioBase64, onStart, onEnd, mySessionId);
+            this.playAudioBase64(res.data.audioBase64, onStart, onEnd, mySessionId, cleanedText, voiceParams);
           } else if (onEnd) {
             onEnd();
           }

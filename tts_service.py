@@ -328,10 +328,13 @@ def synthesize_speech_bytes(
     """
     Synthesizes speech into high-quality MP3 bytes.
     Returns (audio_bytes, voice_name_used).
+    Reads the complete message cleanly without truncating early.
     """
-    clean_text = extract_speech_text(text, target_language, max_chars=420)
+    clean_text = clean_text_for_speech(text, target_language)
     if not clean_text or len(clean_text) < 2:
         return None, "empty"
+    # Keep full conversational response up to 3000 characters
+    clean_text = clean_text[:3000].strip()
 
     lang_key = target_language.lower() if target_language.lower() in ["hi", "te"] else "en"
     vg = str(voice_gender).lower()

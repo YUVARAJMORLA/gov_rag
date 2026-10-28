@@ -281,11 +281,22 @@ def query_databricks_vector_search(query_text: str, num_results: int = 5) -> Tup
         vsc = VectorSearchClient(workspace_url=f"https://{host}", personal_access_token=token, disable_notice=True)
         idx = vsc.get_index(endpoint_name=endpoint_name, index_name=VS_INDEX_NAME)
 
-        vs = idx.similarity_search(
-            query_vector=qv,
-            columns=["chunk_id", "file_name", "chunk_text", "version"],
-            num_results=num_results
-        )
+        # Query index using Databricks HYBRID search (dense semantic embeddings + BM25 keyword matching)
+        try:
+            vs = idx.similarity_search(
+                query_text=query_text,
+                query_vector=qv,
+                query_type="HYBRID",
+                columns=["chunk_id", "file_name", "chunk_text", "version"],
+                num_results=num_results
+            )
+        except Exception as e_hybrid:
+            print(f"[HYBRID SEARCH NOTICE] {e_hybrid}. Falling back to standard vector search.")
+            vs = idx.similarity_search(
+                query_vector=qv,
+                columns=["chunk_id", "file_name", "chunk_text", "version"],
+                num_results=num_results
+            )
 
         raw = vs.get("result", {}).get("data_array", [])
         for doc in raw:
@@ -396,6 +407,193 @@ The platform currently contains verified official documentation and implementati
 """
 
 
+OFFICIAL_SCHEME_KNOWLEDGE = {
+    "ayushman_bharat": """
+OFFICIAL SCHEME GUIDELINES: AYUSHMAN BHARAT (PM-JAY & ABDM)
+Pillar 1: Ayushman Bharat - Pradhan Mantri Jan Arogya Yojana (AB-PMJAY):
+- Core Benefit & Financial Coverage: Cashless health insurance cover up to ₹5,00,000 (₹5 Lakh) per family per year for secondary and tertiary care hospitalization across impaneled public and private hospitals nationwide. Covers medical examinations, treatment, consultation, pre-hospitalization (up to 3 days), post-hospitalization (up to 15 days), ICU charges, diagnostics, and medicines.
+- Expanded Senior Citizen Coverage: All senior citizens aged 70 years and above are eligible for an additional ₹5,00,000 annual health cover under the Ayushman Vay Vandana Card, regardless of income.
+- Eligibility Criteria:
+  1. Rural families meeting deprivation criteria (D1 to D7) from Socio-Economic Caste Census (SECC 2011).
+  2. Urban families belonging to 11 occupational categories (ragpickers, domestic workers, street vendors, cobblers, construction workers, transport workers, etc.).
+  3. Existing beneficiaries of the erstwhile Rashtriya Swasthya Bima Yojana (RSBY).
+  4. All senior citizens aged 70 and above.
+- Required Documents for Ayushman Card:
+  1. Aadhaar Card (mandatory for identity and biometric e-KYC).
+  2. Ration Card, Family ID, or official PM-JAY entitlement letter (bearing Family HHD ID number).
+  3. Active Mobile Number for verification and OTP.
+  4. Age proof for 70+ seniors (Aadhaar or Birth Certificate).
+- How to Apply & Generate Ayushman Card:
+  1. Check eligibility online at 'mera.pmjay.gov.in' or download the Ayushman App, or call toll-free helpline 14555.
+  2. Visit your nearest Common Service Center (CSC), UTIITSL/UTI center, or the Arogya Mitra desk at any empaneled hospital.
+  3. Undergo biometric e-KYC verification to generate and download your Ayushman Card (Golden Card).
+
+Pillar 2: Ayushman Bharat Digital Mission (ABDM):
+- Core Benefit: Creates a 14-digit unique Ayushman Bharat Health Account (ABHA number) and digital health card for every citizen, enabling seamless digital storage and sharing of electronic medical records, lab reports, and prescriptions with verified doctors and hospitals.
+- How to Register for ABHA: Visit 'abdm.gov.in' or download the ABHA App or use Aarogya Setu; complete instant verification with Aadhaar number and OTP.
+""",
+
+    "pm_kisan": """
+OFFICIAL SCHEME GUIDELINES: PRADHAN MANTRI KISAN SAMMAN NIDHI (PM-KISAN)
+- Core Benefit & Financial Figures: ₹6,000 per year direct income support transferred in three equal four-monthly installments of ₹2,000 each (April-July, August-November, December-March) directly into the Aadhaar-linked bank accounts of beneficiary farmers via Direct Benefit Transfer (DBT).
+- Eligibility Criteria:
+  1. Small and marginal landholder farmer families with cultivable landholding registered in their names as per state land revenue records.
+  2. Family comprises husband, wife, and minor children.
+  3. Exclusions: Institutional landholders, former or present holders of constitutional posts, current or former Ministers/MPs/MLAs, serving or retired government officers/employees, professionals (doctors, engineers, lawyers, CAs), and persons who paid income tax in the last assessment year or receive monthly pension of ₹10,000 or more.
+- Required Documents:
+  1. Aadhaar Card (mandatory with completed e-KYC).
+  2. Land Ownership Proof: Record of Rights (RoR), Khasra-Khatauni, Patta, or Jamabandi showing applicant as landholder.
+  3. Active Savings Bank Account passbook with IFSC code (must be Aadhaar-seeded and NPCI-mapped).
+  4. Mobile Number linked to Aadhaar.
+  5. Passport-size photograph.
+- How to Apply:
+  1. Online Self-Registration: Visit 'pmkisan.gov.in', click 'Farmers Corner' -> 'New Farmer Registration'. Enter Aadhaar number, state, mobile number, land details, and submit.
+  2. In-Person Registration: Visit the nearest Common Service Center (CSC) or contact the local Village Revenue Officer / District Agriculture Officer.
+  3. Mandatory e-KYC: Must be completed online via OTP at 'pmkisan.gov.in' or via biometric authentication at any CSC or facial authentication on the PM-KISAN mobile app.
+""",
+
+    "pmjjby": """
+OFFICIAL SCHEME GUIDELINES: PRADHAN MANTRI JEEVAN JYOTI BIMA YOJANA (PMJJBY)
+- Core Benefit & Financial Figures: Renewable one-year term life insurance coverage of ₹2,00,000 (₹2 Lakh) in case of death of the insured member due to any cause (natural or accidental).
+- Premium: ₹436 per year per member, auto-debited in a single installment from the subscriber's bank or post office savings account.
+- Eligibility Criteria:
+  1. Any individual aged 18 to 50 years holding a savings bank or post office account.
+  2. Coverage continues up to age 55 years provided annual premium is paid before age 50.
+  3. An individual can join through only one savings bank account.
+- Required Documents:
+  1. Aadhaar Card (as primary KYC).
+  2. Savings Bank or Post Office account passbook/details.
+  3. Duly completed Consent-cum-Declaration Enrollment Form with auto-debit authorization.
+  4. Nominee details (name, relationship, age, and photo ID of nominee).
+- How to Apply:
+  1. Bank Branch / Post Office: Visit your bank or post office branch and submit the simple one-page PMJJBY consent form.
+  2. Net Banking / Mobile Banking: Log into your bank's Internet Banking or mobile banking app, navigate to 'Insurance / Social Security Schemes', select PMJJBY, confirm details, and authorize auto-debit.
+""",
+
+    "pmsby": """
+OFFICIAL SCHEME GUIDELINES: PRADHAN MANTRI SURAKSHA BIMA YOJANA (PMSBY)
+- Core Benefit & Financial Figures: Accidental insurance coverage of ₹2,00,000 (₹2 Lakh) for accidental death or permanent total disability (loss of both eyes or both hands/feet), and ₹1,00,000 for permanent partial disability (loss of one eye or one hand/foot).
+- Premium: Highly affordable premium of ₹20 per year per member, auto-debited annually.
+- Eligibility Criteria: Individuals aged 18 to 70 years with an active savings bank or post office account.
+- Required Documents: Aadhaar Card, savings bank passbook/account details, auto-debit consent form, nominee information.
+- How to Apply: Submit the enrollment form at your bank branch, post office, or activate online via your bank's Net Banking / Mobile Banking app.
+""",
+
+    "atal_pension": """
+OFFICIAL SCHEME GUIDELINES: ATAL PENSION YOJANA (APY)
+- Core Benefit & Financial Figures: Guaranteed monthly pension of ₹1,00, ₹2,000, ₹3,000, ₹4,000, or ₹5,000 after attaining 60 years of age until death. After subscriber's death, the exact same pension amount is paid to the spouse. After spouse's demise, the entire accumulated pension wealth (corpus) is returned to the nominee.
+- Eligibility Criteria:
+  1. Any Indian citizen aged 18 to 40 years holding a savings bank or post office account.
+  2. Must not be an income tax payer (as per rules from October 1, 2022).
+- Required Documents: Aadhaar Card, Savings bank/post office account details, Mobile number, Nominee information.
+- How to Apply: Visit your bank or post office branch where you hold an account and fill the APY registration form, or register online through your bank's net banking portal.
+""",
+
+    "beti_bachao": """
+OFFICIAL SCHEME GUIDELINES: BETI BACHAO BETI PADHAO (BBBP) & SUKANYA SAMRIDDHI YOJANA (SSY)
+- Core Objectives & Benefits:
+  1. Elimination of gender-biased sex selection and female foeticide.
+  2. Ensuring survival, protection, and quality education for the girl child.
+  3. Integrated Financial Welfare Scheme: **Sukanya Samriddhi Yojana (SSY)**, which provides a high government-backed interest rate (~8.2% p.a.), triple tax exemptions under Section 80C (EEE status), and financial security for girl child higher education and marriage.
+- Eligibility:
+  1. Any girl child residing in India from birth up to 10 years of age (can open account up to age 10).
+  2. Maximum 2 accounts per family (one per girl child; exception for twins/triplets).
+- Required Documents:
+  1. Birth Certificate of the girl child (mandatory, issued by hospital or registrar of births).
+  2. Identity Proof of the parent or legal guardian (Aadhaar Card, PAN Card, Voter ID, or Passport).
+  3. Residence / Address Proof of the parent/guardian (Electricity bill, Ration Card, Aadhaar).
+  4. Recent passport-size photographs of the girl child and parent/guardian.
+- How to Apply:
+  1. To open a Sukanya Samriddhi Account under the BBBP initiative: Visit any Post Office or authorized commercial bank branch (SBI, PNB, BoB, Canara, etc.). Fill Form-1 (SSY Account Opening Form), submit the documents, and deposit a minimum opening amount of ₹250.
+  2. For educational incentives, school enrollment benefits, and counseling: Contact the local District Women and Child Development (WCD) Office, District Magistrate's office, or local Anganwadi Center.
+""",
+
+    "mudra": """
+OFFICIAL SCHEME GUIDELINES: PRADHAN MANTRI MUDRA YOJANA (PMMY)
+- Core Benefit & Financial Figures: Collateral-free institutional credit up to ₹10,00,000 (₹10 Lakh) for non-farm micro and small business enterprises across three categories:
+  1. Shishu: Loans up to ₹50,000 (for new/startup micro businesses).
+  2. Kishore: Loans from ₹50,001 to ₹5,00,000 (for growing businesses needing equipment/inventory).
+  3. Tarun: Loans from ₹5,00,001 to ₹10,00,000 (for established small businesses expanding operations).
+- Eligibility Criteria: Any Indian citizen with a viable business plan for non-corporate, non-farm income-generating activities in manufacturing, trading, services, or allied agriculture.
+- Required Documents:
+  1. Proof of Identity: Aadhaar Card, Voter ID, PAN Card, or Passport.
+  2. Proof of Residence: Aadhaar, Electricity Bill, Ration Card, or Voter ID.
+  3. Proof of Business: Udyam Registration, trade license, partnership deed, or registration certificate.
+  4. Financial Documents: Bank statement of the last 6 months.
+  5. Business Quotations: Quotation of machinery/equipment to be purchased or project report.
+  6. Recent passport-size photographs.
+- How to Apply: Apply online on the Udyamimitra portal ('udyamimitra.in') or visit any commercial bank, Regional Rural Bank (RRB), Small Finance Bank, or MFI branch.
+""",
+
+    "vishwakarma": """
+OFFICIAL SCHEME GUIDELINES: PM VISHWAKARMA SCHEME
+- Core Benefits & Financial Figures:
+  1. PM Vishwakarma Certificate and ID Card recognizing traditional artisans and craftspeople.
+  2. Skill Training: 5 to 7 days Basic Training and 15 days Advanced Training, with a daily stipend of ₹500.
+  3. Modern Toolkit Incentive: e-Voucher grant of ₹15,000 for purchasing modern specialized tools.
+  4. Collateral-Free Enterprise Credit: Concessional loans up to ₹3,00,000 at a fixed 5% interest rate (Tranche 1: ₹1,00,000 repayable in 18 months; Tranche 2: ₹2,00,000 repayable in 30 months).
+  5. Digital Transaction Incentive: ₹1 per digital transaction up to 100 transactions/month.
+- Eligibility Criteria:
+  1. Traditional artisan or craftsperson working with hands and tools in one of the 18 specified trades: Carpenter (Suthar), Boat Maker, Armorer, Blacksmith (Lohar), Hammer & Tool Kit Maker, Locksmith, Sculptor (Moortikar/Stone carver), Goldsmith (Sonar), Potter (Kumhaar), Cobbler (Charmakar), Mason (Rajmistri), Basket/Mat/Broom Maker, Doll & Toy Maker, Barber (Naai), Garland Maker (Malakaar), Washerman (Dhobi), Tailor (Darzi), Fishing Net Maker.
+  2. Minimum age 18 years; registration restricted to one member per family.
+- Required Documents:
+  1. Aadhaar Card (mandatory with biometric verification).
+  2. Active Mobile Number linked to Aadhaar.
+  3. Bank Account passbook/details (must be Aadhaar-seeded).
+  4. Ration Card (mandatory for family identification).
+- How to Apply: Visit your nearest Common Service Center (CSC). Complete biometric authentication on 'pmvishwakarma.gov.in'. The application is verified by the Gram Panchayat / Urban Local Body, followed by District and State screening.
+""",
+
+    "pm_rahat": """
+OFFICIAL SCHEME GUIDELINES: PM-RAHAT (SCHEME FOR ROAD ACCIDENT VICTIMS)
+- Core Benefit & Financial Figures: Cashless emergency medical stabilization and trauma care up to ₹1,50,000 (₹1.5 Lakh) per victim for a maximum of 7 days during the critical 'Golden Hour' period after any road accident occurring on Indian national highways and public roads.
+- Eligibility: All road accident victims regardless of nationality, residence, or insurance status.
+- Required Documents: Immediate emergency treatment requires NO upfront documents or cash deposit. Post-stabilization verification uses victim's Aadhaar or relative's photo identity.
+- How it Works: Highway emergency ambulances (1033 / 112) transport victims directly to designated trauma network hospitals. Treatment is reimbursed directly to the hospital through the National Trauma Network.
+""",
+
+    "msme_clusters": """
+OFFICIAL SCHEME GUIDELINES: ASPIRE, SFURTI & MSE-CDP (MSME & RURAL CLUSTERS)
+1. ASPIRE: Financial grant assistance up to ₹1 Crore to set up Livelihood Business Incubators (LBIs) and up to ₹1 Crore for Technology Business Incubators (TBIs) to promote rural enterprise and agro-processing livelihoods. Apply via 'aspire.msme.gov.in'.
+2. SFURTI: Grant assistance up to ₹2.5 Crore (Regular clusters up to 500 artisans) and up to ₹5 Crore (Major clusters > 500 artisans) to establish Common Facility Centers (CFCs), raw material banks, and modern design tools for traditional artisans. Apply via 'sfurti.msme.gov.in'.
+3. MSE-CDP: Financial support for infrastructure development and Common Facility Centers in micro and small enterprise industrial clusters.
+"""
+}
+
+
+def find_relevant_scheme_context(query: str) -> Optional[str]:
+    """Finds official verified scheme guidelines matching citizen's specific inquiry."""
+    if not query:
+        return None
+    q_lower = query.lower()
+    matched = []
+
+    if any(k in q_lower for k in ["ayushman", "pmjay", "pm-jay", "jan arogya", "health cover", "5 lakh", "5lakh", "abha", "abdm", "health card", "ఆయుష్మాన్", "ఆరోగ్య", "आयुष्मान", "जन आरोग्य"]):
+        matched.append(OFFICIAL_SCHEME_KNOWLEDGE["ayushman_bharat"])
+    if any(k in q_lower for k in ["kisan", "pm-kisan", "pmkisan", "samman nidhi", "farmer", "6000", "రైతు", "కిసాన్", "किसान"]):
+        matched.append(OFFICIAL_SCHEME_KNOWLEDGE["pm_kisan"])
+    if any(k in q_lower for k in ["pmjjby", "jeevan jyoti", "life insurance", "2 lakh", "436", "జీవన్ జ్యోతి", "जीवन ज्योति"]):
+        matched.append(OFFICIAL_SCHEME_KNOWLEDGE["pmjjby"])
+    if any(k in q_lower for k in ["pmsby", "suraksha bima", "accident", "20/yr", "సురక్ష బీమా", "सुरक्षा बीमा"]):
+        matched.append(OFFICIAL_SCHEME_KNOWLEDGE["pmsby"])
+    if any(k in q_lower for k in ["atal pension", "apy", "pension", "అటల్ పెన్షన్", "अटल पेंशन"]):
+        matched.append(OFFICIAL_SCHEME_KNOWLEDGE["atal_pension"])
+    if any(k in q_lower for k in ["beti bachao", "beti padhao", "bbbp", "girl child", "sukanya", "బేటీ బచావో", "సమృద్ధి", "बेटी बचाओ", "सुकन्या"]):
+        matched.append(OFFICIAL_SCHEME_KNOWLEDGE["beti_bachao"])
+    if any(k in q_lower for k in ["mudra", "pmmy", "shishu", "kishore", "tarun", "loan", "ముద్రా", "मुद्रा"]):
+        matched.append(OFFICIAL_SCHEME_KNOWLEDGE["mudra"])
+    if any(k in q_lower for k in ["vishwakarma", "artisan", "craft", "toolkit", "విశ్వకర్మ", "विश्वकर्मा"]):
+        matched.append(OFFICIAL_SCHEME_KNOWLEDGE["vishwakarma"])
+    if any(k in q_lower for k in ["rahat", "accident victim", "golden hour", "trauma", "రాహత్", "राहत"]):
+        matched.append(OFFICIAL_SCHEME_KNOWLEDGE["pm_rahat"])
+    if any(k in q_lower for k in ["aspire", "sfurti", "cluster", "mse-cdp", "lbi", "tbi"]):
+        matched.append(OFFICIAL_SCHEME_KNOWLEDGE["msme_clusters"])
+
+    if matched:
+        return "\n\n".join(matched)
+    return None
+
+
 def is_overview_or_catalog_query(q: str) -> bool:
     """Detects if a citizen is asking for an overview or list of all available schemes."""
     if not q:
@@ -443,12 +641,18 @@ def invoke_bedrock_converse(
         "      - List each scheme EXACTLY ONCE with its official full name, acronym, and a concise 1-line summary of its core benefit and financial figure.\n"
         "      - DO NOT force the single-scheme template ('Key Benefits', 'Key Features', 'How to Apply') onto a list request!\n"
         "      - Conclude with a helpful tip inviting the citizen to ask for in-depth eligibility or application steps for any specific scheme.\n"
-        "   B. FOR SPECIFIC SCHEME INQUIRIES (e.g. citizen asks about a single scheme like PM-KISAN, PMJJBY, etc.):\n"
-        "      - Introduce the Scheme Name ONCE at the top.\n"
-        "      - Key Benefits & Core Financial Figures: Include exact financial numbers (e.g. ₹6,000, ₹2 Lakh, ₹5 Lakh, ₹436/yr).\n"
-        "      - Key Features / Eligibility: 2-3 concise, neat bullet points.\n"
-        "      - How to Apply: Simple numbered steps (1, 2, 3) specifying where to enroll and basic KYC required (Aadhaar).\n"
-        "      - Keep total response around 120-180 words."
+        "   B. FOR SPECIFIC CITIZEN QUESTIONS (documents, application steps, eligibility, benefits, or scheme details):\n"
+        "      - DIRECTLY AND ACCURATELY ANSWER THE CITIZEN'S SPECIFIC QUESTION first and foremost without repeating irrelevant boilerplate!\n"
+        "      - IF THE CITIZEN ASKS ABOUT REQUIRED DOCUMENTS:\n"
+        "        List the exact required documents clearly in bullet points (e.g. Aadhaar Card, Ration Card / Family ID, Land records / Khasra-Khatauni, Bank Passbook with IFSC, Mobile number, Photo) and specify where to submit them.\n"
+        "      - IF THE CITIZEN ASKS ABOUT HOW TO APPLY:\n"
+        "        Provide clear, actionable, numbered step-by-step application instructions (official portal URL, CSC / bank / hospital desk, forms to fill, verification process).\n"
+        "      - IF THE CITIZEN ASKS ABOUT ELIGIBILITY OR BENEFITS:\n"
+        "        State the exact financial coverage/amounts (e.g. ₹5 Lakh, ₹6,000/yr, ₹2 Lakh) and eligibility conditions (age, income, landholding, target groups).\n"
+        "      - IF THE CITIZEN ASKS A GENERAL OVERVIEW ABOUT A SINGLE SCHEME:\n"
+        "        Provide a concise overview with Scheme Name, Core Financial Figures & Benefits, Eligibility, and How to Apply.\n"
+        "      - NEVER append a full catalog list of all schemes when the citizen asked a question about a specific scheme!\n"
+        "      - Ensure tone is helpful, authoritative, respectful, and citizen-friendly."
     )
 
     if target_language == "hi":
@@ -1003,6 +1207,14 @@ def execute_rag_pipeline(
         texts.insert(0, OFFICIAL_SCHEMES_CATALOG_CONTEXT)
         cids.insert(0, "official_schemes_catalog")
         scores.insert(0, 1.0)
+    else:
+        # Prepend authoritative verified scheme guidelines if inquiry matches a specific government scheme
+        scheme_ctx = find_relevant_scheme_context(search_query) or find_relevant_scheme_context(safe_question)
+        if scheme_ctx:
+            print(f"[RAG] Matching verified scheme guidelines identified -> Prepending official scheme facts.")
+            texts.insert(0, scheme_ctx)
+            cids.insert(0, "official_scheme_verified_guidelines")
+            scores.insert(0, 1.0)
 
     # 4. LLM answer (Bedrock Converse API or Databricks Fallback)
     answer, it, ot, model_used, audio_out = generate_with_fallback(
