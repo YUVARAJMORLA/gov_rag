@@ -13,6 +13,7 @@ export class VoiceAssistant {
     this.currentLanguage = 'en'; // 'en' | 'hi' | 'te'
     this.currentAudio = null;
     this.audioCache = new Map(); // Cache generated audio to prevent duplicate API calls
+    this.speechSessionId = 0; // Concurrency mutex to prevent overlapping audio streams
 
     if (this.synth) {
       this.loadVoices();
@@ -301,8 +302,8 @@ export class VoiceAssistant {
     } else if (chosenLang === 'te') {
       recognition.lang = 'te-IN';
     } else {
-      // Default to en-US which matches the locally installed Windows speech pack
-      recognition.lang = 'en-US';
+      // Default to en-IN (Indian English) which recognizes Indian accents, names, and scheme terms accurately
+      recognition.lang = 'en-IN';
     }
 
     // Use continuous = true so brief natural pauses (e.g., between "What is" and "PM-KISAN") do not drop words or abort
@@ -435,15 +436,34 @@ export class VoiceAssistant {
     }
   }
 
-  // 3. Play base64 audio stream (For Neural Telugu/Hindi & Nova Sonic Voice)
-  playAudioBase64(base64Data, onStart, onEnd) {
+  // 3. Play base64 audio stream with session token to prevent overlapping
+  playAudioBase64(base64Data, onStart, onEnd, sessionId = null) {
+    const activeSession = sessionId || ++this.speechSessionId;
+    this.speechSessionId = activeSession;
+
+    // Immediately stop and detach any previous audio
+    if (this.currentAudio) {
+      try {
+        this.currentAudio.pause();
+        this.currentAudio.currentTime = 0;
+        this.currentAudio.onplay = null;
+        this.currentAudio.onended = null;
+        this.currentAudio.onerror = null;
+        this.currentAudio.src = '';
+      } catch (_) {}
+      this.currentAudio = null;
+    }
+    if (this.synth) {
+      try { this.synth.cancel(); } catch (_) {}
+    }
+
     try {
-      this.stopSpeaking();
       const audio = new Audio(`data:audio/mp3;base64,${base64Data}`);
       this.currentAudio = audio;
 
       let hasStarted = false;
       const triggerStart = () => {
+        if (this.speechSessionId !== activeSession) return;
         if (!hasStarted) {
           hasStarted = true;
           if (onStart) onStart();
@@ -454,7 +474,9 @@ export class VoiceAssistant {
       const triggerEnd = () => {
         if (!hasEnded) {
           hasEnded = true;
-          this.currentAudio = null;
+          if (this.currentAudio === audio) {
+            this.currentAudio = null;
+          }
           if (onEnd) onEnd();
         }
       };
@@ -462,26 +484,46 @@ export class VoiceAssistant {
       audio.onplay = triggerStart;
       audio.onended = triggerEnd;
       audio.onerror = (e) => {
-        console.warn('Audio element error:', e);
+        console.warn('Audio playback notice:', e);
         triggerEnd();
       };
 
       const playPromise = audio.play();
       if (playPromise !== undefined) {
-        playPromise
-          .then(() => {
-            triggerStart();
-          })
-          .catch((err) => {
-            console.warn('Audio play notice (interaction required or audio format):', err);
-            triggerEnd();
-          });
+        playPromise.catch((err) => {
+          console.warn('Audio play notice (interaction or format):', err);
+          triggerEnd();
+        });
       }
       return audio;
     } catch (e) {
       console.warn('Failed to play audio:', e);
       if (onEnd) onEnd();
     }
+  }
+
+  // Helper to extract a natural concise excerpt (< 420 chars) at a complete sentence boundary for rapid speech (< 1.5s)
+  extractSpeechExcerpt(text, lang = 'en', maxChars = 420) {
+    if (!text) return '';
+    const clean = this.cleanTextForSpeech(text, lang);
+    if (clean.length <= maxChars) return clean;
+
+    const boundaryMarkers = ['. ', '! ', '? ', '। ', '\n', '; '];
+    let bestPos = -1;
+    for (const b of boundaryMarkers) {
+      const pos = clean.lastIndexOf(b, maxChars);
+      if (pos > 180 && pos > bestPos) {
+        bestPos = pos + (b === '\n' ? 0 : b.length);
+      }
+    }
+    if (bestPos > 180) {
+      return clean.substring(0, bestPos).trim();
+    }
+    const spacePos = clean.lastIndexOf(' ', maxChars);
+    if (spacePos > 200) {
+      return clean.substring(0, spacePos).trim() + (lang === 'hi' ? '।' : '.');
+    }
+    return clean.substring(0, maxChars).trim() + (lang === 'hi' ? '।' : '.');
   }
 
   // 4. Universal Multilingual Speak (Uses High-Quality Neural Voices for Telugu, Hindi, Nova Sonic)
@@ -495,14 +537,16 @@ export class VoiceAssistant {
     onEnd
   }) {
     this.stopSpeaking();
+    const mySessionId = ++this.speechSessionId;
+
     if (!text || !text.trim()) {
       if (onEnd) onEnd();
       return;
     }
 
-    // A. If pre-synthesized base64 audio is already available, play immediately
+    // A. If pre-synthesized base64 audio is already available, play immediately (zero network delay)
     if (audioBase64) {
-      return this.playAudioBase64(audioBase64, onStart, onEnd);
+      return this.playAudioBase64(audioBase64, onStart, onEnd, mySessionId);
     }
 
     const lang = targetLanguage || this.currentLanguage || 'en';
@@ -513,38 +557,46 @@ export class VoiceAssistant {
       isNovaSonic ||
       (voiceId && (voiceId.includes('neural') || voiceId.includes('nova')));
 
-    // Phonetically clean text to correctly pronounce ₹6,000/- as "ఆరు వేల రూపాయలు" instead of "6 rupee 000"
-    const cleanedText = this.cleanTextForSpeech(text, lang);
+    // Use fast concise conversational excerpt (< 420 chars) to prevent 15-20s synthesis delays
+    const spokenExcerpt = this.extractSpeechExcerpt(text, lang);
 
-    // B. If Neural voice (Telugu, Hindi, Nova Sonic), fetch studio-grade audio from backend
+    // B. If Neural voice (Telugu, Hindi, Nova Sonic, or Indian English), fetch studio-grade audio from backend
     if (isNeural) {
-      const cacheKey = `${lang}_${voiceId}_${cleanedText.length}_${cleanedText.substring(0, 40)}_${cleanedText.slice(-40)}`;
+      const cacheKey = `${lang}_${voiceId}_${spokenExcerpt.substring(0, 60)}_${spokenExcerpt.length}`;
       if (this.audioCache.has(cacheKey)) {
-        return this.playAudioBase64(this.audioCache.get(cacheKey), onStart, onEnd);
+        if (this.speechSessionId !== mySessionId) return;
+        return this.playAudioBase64(this.audioCache.get(cacheKey), onStart, onEnd, mySessionId);
       }
 
       const gender = (voiceId && (voiceId.includes('mohan') || voiceId.includes('madhur') || voiceId.includes('prabhat') || voiceId.includes('male'))) ? 'Male' : 'Female';
 
       try {
-        const res = await chatAPI.synthesizeSpeech(cleanedText, lang, gender, isNovaSonic);
+        const res = await chatAPI.synthesizeSpeech(spokenExcerpt, lang, gender, isNovaSonic);
+        // MUTEX CHECK: If user clicked Listen again or switched while awaiting, DO NOT PLAY
+        if (this.speechSessionId !== mySessionId) return;
+
         if (res.data?.success && res.data.audioBase64) {
           this.audioCache.set(cacheKey, res.data.audioBase64);
-          return this.playAudioBase64(res.data.audioBase64, onStart, onEnd);
+          return this.playAudioBase64(res.data.audioBase64, onStart, onEnd, mySessionId);
         }
       } catch (err) {
         console.warn('Backend neural TTS synthesis notice:', err.message);
       }
     }
 
+    // MUTEX CHECK
+    if (this.speechSessionId !== mySessionId) return;
+
     // C. Fallback: Browser Web Speech API with automatic backend fallback on failure
     try {
-      this.speak(cleanedText, onStart, onEnd, voiceId, isNovaSonic, lang);
+      this.speak(spokenExcerpt, onStart, onEnd, voiceId, isNovaSonic, lang, mySessionId);
     } catch (_fallbackErr) {
       const fallbackGender = (voiceId && (voiceId.includes('prabhat') || voiceId.includes('male'))) ? 'Male' : 'Female';
-      chatAPI.synthesizeSpeech(cleanedText, lang, fallbackGender, false)
+      chatAPI.synthesizeSpeech(spokenExcerpt, lang, fallbackGender, false)
         .then((res) => {
+          if (this.speechSessionId !== mySessionId) return;
           if (res.data?.success && res.data.audioBase64) {
-            this.playAudioBase64(res.data.audioBase64, onStart, onEnd);
+            this.playAudioBase64(res.data.audioBase64, onStart, onEnd, mySessionId);
           } else if (onEnd) {
             onEnd();
           }
@@ -667,15 +719,25 @@ export class VoiceAssistant {
 
 
   // 5. Standard Browser Web Speech API fallback
-  speak(text, onStart, onEnd, preferredVoiceId = null, isNovaSonic = false, lang = 'en') {
+  speak(text, onStart, onEnd, preferredVoiceId = null, isNovaSonic = false, lang = 'en', sessionId = null) {
+    const activeSession = sessionId || ++this.speechSessionId;
+    this.speechSessionId = activeSession;
+
     if (!this.synth) {
       if (onEnd) onEnd();
       return;
     }
 
-    this.synth.cancel();
+    try { this.synth.cancel(); } catch (_) {}
     if (this.currentAudio) {
-      try { this.currentAudio.pause(); } catch (_) {}
+      try {
+        this.currentAudio.pause();
+        this.currentAudio.currentTime = 0;
+        this.currentAudio.onplay = null;
+        this.currentAudio.onended = null;
+        this.currentAudio.onerror = null;
+        this.currentAudio.src = '';
+      } catch (_) {}
       this.currentAudio = null;
     }
 
@@ -737,7 +799,14 @@ export class VoiceAssistant {
       }
     };
 
-    if (onStart) utterance.onstart = onStart;
+    utterance.onstart = () => {
+      if (this.speechSessionId !== activeSession) {
+        try { this.synth.cancel(); } catch (_) {}
+        return;
+      }
+      if (onStart) onStart();
+    };
+
     utterance.onend = triggerEnd;
     utterance.onerror = (err) => {
       console.warn('SpeechSynthesis error:', err);
@@ -767,11 +836,19 @@ export class VoiceAssistant {
 
   // 6. Cancel Speech
   stopSpeaking() {
+    this.speechSessionId++;
     if (this.synth) {
-      this.synth.cancel();
+      try { this.synth.cancel(); } catch (_) {}
     }
     if (this.currentAudio) {
-      try { this.currentAudio.pause(); } catch (_) {}
+      try {
+        this.currentAudio.pause();
+        this.currentAudio.currentTime = 0;
+        this.currentAudio.onplay = null;
+        this.currentAudio.onended = null;
+        this.currentAudio.onerror = null;
+        this.currentAudio.src = '';
+      } catch (_) {}
       this.currentAudio = null;
     }
   }

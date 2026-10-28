@@ -24,3 +24,4 @@ EXIT_CODE=$?
 
 echo "A primary service exited with code $EXIT_CODE. Exiting container..."
 cleanup
+

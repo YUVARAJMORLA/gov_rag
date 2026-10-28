@@ -8,7 +8,7 @@ const PYTHON_BRIDGE_URL = process.env.PYTHON_BRIDGE_URL || 'http://127.0.0.1:500
 exports.sendQuery = async (req, res) => {
   try {
     const userId = req.user._id;
-    const { sessionId, query, model = 'Auto', numResults = 5, targetLanguage = 'en' } = req.body;
+    const { sessionId, query, model = 'Auto', numResults = 5, targetLanguage = 'en', isVoice = false } = req.body;
 
     if (!sessionId || !query || !query.trim()) {
       return res.status(400).json({
@@ -53,7 +53,8 @@ exports.sendQuery = async (req, res) => {
         model,
         num_results: Number(numResults) || 5,
         is_first_turn: isFirstTurn,
-        target_language: targetLanguage
+        target_language: targetLanguage,
+        is_voice: Boolean(isVoice)
       }, { timeout: 60000 });
 
       if (response.data && response.data.success) {

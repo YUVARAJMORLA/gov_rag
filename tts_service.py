@@ -269,10 +269,40 @@ def clean_text_for_speech(text: str, lang: str = "en") -> str:
         t = re.sub(r'\bPM-JJBY\b', 'P M J J B Y', t, flags=re.IGNORECASE)
         t = re.sub(r'\bPMJJBY\b', 'P M J J B Y', t, flags=re.IGNORECASE)
 
-    # Normalize whitespace and preserve full response for citizen (up to 4000 chars safety ceiling)
+    # Normalize whitespace and strip markdown formatting
     t = re.sub(r'\s+', ' ', t).strip()
-    return t[:4000]
+    return t
 
+
+def extract_speech_text(text: str, lang: str = "en", max_chars: int = 420) -> str:
+    """
+    Extracts a concise, natural, conversational spoken summary from a full answer.
+    Preserves introductory direct answer and key figures while terminating at a
+    clean sentence boundary for ultra-fast, natural TTS playback (< 1.5 seconds).
+    """
+    cleaned = clean_text_for_speech(text, lang)
+    if not cleaned:
+        return ""
+    if len(cleaned) <= max_chars:
+        return cleaned
+
+    # Search for natural sentence boundary between 180 and max_chars
+    boundary_chars = ['. ', '! ', '? ', '। ', '\n', '; ']
+    best_pos = -1
+    for b in boundary_chars:
+        pos = cleaned.rfind(b, 180, max_chars)
+        if pos > best_pos:
+            best_pos = pos + (len(b) if b != '\n' else 0)
+
+    if best_pos > 180:
+        return cleaned[:best_pos].strip()
+
+    # Fallback to word boundary
+    space_pos = cleaned.rfind(' ', 200, max_chars)
+    if space_pos > 200:
+        return cleaned[:space_pos].strip() + ('.' if lang != 'hi' else '।')
+
+    return cleaned[:max_chars].strip() + ('.' if lang != 'hi' else '।')
 
 
 # In-memory LRU-style cache for synthesized speech: (voice_name, text_hash) -> audio_bytes
@@ -299,7 +329,7 @@ def synthesize_speech_bytes(
     Synthesizes speech into high-quality MP3 bytes.
     Returns (audio_bytes, voice_name_used).
     """
-    clean_text = clean_text_for_speech(text, target_language)
+    clean_text = extract_speech_text(text, target_language, max_chars=420)
     if not clean_text or len(clean_text) < 2:
         return None, "empty"
 

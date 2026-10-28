@@ -794,11 +794,12 @@ def execute_rag_pipeline(
     audio_format: str = "wav",
     num_results: int = 5,
     is_first_turn: bool = False,
-    target_language: str = "en"
+    target_language: str = "en",
+    is_voice: bool = False
 ) -> Dict[str, Any]:
     """
     Full end-to-end RAG execution with Hindi/Telugu Beta translation support:
-    0a. Automatic Indic language detection (Telugu/Hindi script)
+    0a. Automatic Indic language detection (Telugu/Hindi script and transliterated roman)
     0b. Security: Prompt injection check & PII Masking
     1. Embed query (databricks-gte-large-en)
     2. Vector search (rag_catalog.rag_gov_schema.gold_vector_index)
@@ -815,6 +816,12 @@ def execute_rag_pipeline(
         detected_lang = "te"
     elif bool(re.search(r'[\u0900-\u097F]', user_query)):
         detected_lang = "hi"
+    elif detected_lang == "en":
+        # Detect romanized Telugu or Hindi keywords
+        if bool(re.search(r'\b(cheyali|cheyandi|arhatalu|pathakam|padhakam|dabbu|dabbulu|kavali|darakhastu|ento|telupandi|evariki|evvaru|evaru|bharoosa|raithu|rythu|prabhutva|paddhathi)\b', user_query, re.I)):
+            detected_lang = "te"
+        elif bool(re.search(r'\b(kaise|karein|karna|patrata|kitna|kitne|paise|rupya|bataiye|chahiye|dastavez|kagaz|kisko|milega|pradhan\s*mantri|sarkari)\b', user_query, re.I)):
+            detected_lang = "hi"
 
     # 0a. Conversational Greeting Check (Only when user explicitly greets)
     clean_lower = re.sub(r'[^a-zA-Z\s]', '', user_query.strip().lower()).strip()
@@ -855,9 +862,9 @@ def execute_rag_pipeline(
         except Exception as _e:
             print(f"[GREETING LOG NOTICE] {_e}")
 
-        # Synthesize audio for greetings if requested in regional voice or Nova Sonic
+        # Synthesize audio for greetings if requested in regional voice, Nova Sonic, or voice turn
         greeting_audio = None
-        if detected_lang in ["hi", "te"] or "nova" in selected_model.lower() or audio_bytes:
+        if detected_lang in ["hi", "te"] or "nova" in selected_model.lower() or audio_bytes or is_voice:
             greeting_audio = generate_speech_audio(
                 text=greeting_text,
                 target_language=detected_lang,
@@ -1007,9 +1014,9 @@ def execute_rag_pipeline(
         target_language=detected_lang
     )
 
-    # Audio is automatically generated for Amazon Nova 2.5 Sonic Voice-to-Voice queries or active audio input
+    # Audio is automatically generated for Amazon Nova 2.5 Sonic Voice-to-Voice queries, active voice turns, or audio input
     is_nova = "nova" in str(selected_model).lower() or "sonic" in str(selected_model).lower()
-    if (audio_bytes or is_nova) and not audio_out and answer:
+    if (audio_bytes or is_nova or is_voice) and not audio_out and answer:
         audio_out = generate_speech_audio(
             text=answer,
             target_language=detected_lang,

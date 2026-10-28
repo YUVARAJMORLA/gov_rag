@@ -97,6 +97,7 @@ def rag_query():
         num_results = int(data.get("num_results", 5))
         is_first_turn = bool(data.get("is_first_turn", False))
         target_language = data.get("target_language", "en")
+        is_voice = bool(data.get("is_voice", False))
 
         if not user_query:
             return jsonify({"error": "Query string is required"}), 400
@@ -106,7 +107,8 @@ def rag_query():
             selected_model=selected_model,
             num_results=num_results,
             is_first_turn=is_first_turn,
-            target_language=target_language
+            target_language=target_language,
+            is_voice=is_voice
         )
 
         if result.get("audio_response") and isinstance(result["audio_response"], bytes):

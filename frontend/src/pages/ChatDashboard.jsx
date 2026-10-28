@@ -452,15 +452,21 @@ export const ChatDashboard = ({ onNavigate }) => {
       setMessages((prev) => [...prev, tempUserMsg]);
     }
 
-    // Auto-detect Indic script (Telugu or Hindi)
+    // Auto-detect Indic script (Telugu or Hindi) or Romanized keywords
     let effectiveLanguage = targetLanguage;
-    if (/[\u0C00-\u0C7F]/.test(text)) {
+    if (
+      /[\u0C00-\u0C7F]/.test(text) ||
+      /\b(cheyali|cheyandi|arhatalu|pathakam|padhakam|dabbu|dabbulu|kavali|darakhastu|ento|telupandi|raithu|rythu)\b/i.test(text)
+    ) {
       effectiveLanguage = 'te';
       if (targetLanguage !== 'te') {
         setTargetLanguage('te');
         voiceAssistant.setLanguage('te');
       }
-    } else if (/[\u0900-\u097F]/.test(text)) {
+    } else if (
+      /[\u0900-\u097F]/.test(text) ||
+      /\b(kaise|karein|karna|patrata|kitna|kitne|paise|rupya|bataiye|chahiye|dastavez|kagaz|kisko|milega)\b/i.test(text)
+    ) {
       effectiveLanguage = 'hi';
       if (targetLanguage !== 'hi') {
         setTargetLanguage('hi');
@@ -472,7 +478,8 @@ export const ChatDashboard = ({ onNavigate }) => {
       const modelToUse = voiceMode === 'type2'
         ? 'amazon.nova-2-5-sonic'
         : (selectedModel === 'amazon.nova-2-5-sonic' ? (lastNormalModel || 'Auto') : selectedModel);
-      const res = await chatAPI.sendQuery(currSessionId, text, modelToUse, numResults, effectiveLanguage);
+      const isVoiceTurn = Boolean(isFromVoice || voiceMode === 'type2');
+      const res = await chatAPI.sendQuery(currSessionId, text, modelToUse, numResults, effectiveLanguage, isVoiceTurn);
       if (res.data?.success) {
         const { assistantMessage, sessionTitle } = res.data;
 
@@ -525,15 +532,20 @@ export const ChatDashboard = ({ onNavigate }) => {
               onEnd: () => {
                 setCurrentlySpeakingId(null);
                 if (handsFreeActiveRef.current && activeSessionIdRef.current === currSessionId) {
-                  const notice = effectiveLanguage === 'hi' ? '🎙️ नागरिक की बात सुन रहा हूँ... बोलिए' : (effectiveLanguage === 'te' ? '🎙️ వింటున్నాను... మాట్లాడండి' : '🎙️ Nova Sonic listening... Speak your next question');
+                  const notice = effectiveLanguage === 'hi' ? '🎙️ सुन रहा हूँ... अगला प्रश्न बोलिए' : (effectiveLanguage === 'te' ? '🎙️ వింటున్నాను... తర్వాతి ప్రశ్న మాట్లాడండి' : '🎙️ Nova Sonic listening... Speak your next question');
                   setVoiceStatusNotice(notice);
-                  startContinuousVoiceListen();
+                  setTimeout(() => {
+                    if (handsFreeActiveRef.current && activeSessionIdRef.current === currSessionId) {
+                      startContinuousVoiceListen();
+                    }
+                  }, 350);
                 } else {
                   setVoiceStatusNotice('');
                 }
               }
             });
-          } else if (autoSpeakAnswers && assistantMessage?.content) {
+          } else if ((isFromVoice || autoSpeakAnswers) && assistantMessage?.content) {
+            // Type 1 Push-to-Talk OR Voice Out: speak answer aloud in synchronized, matched language
             playVoiceResponse(assistantMessage.id, assistantMessage.content, assistantMessage?.audioBase64, assistantMessage?.modelUsed);
           }
         }
@@ -620,6 +632,8 @@ export const ChatDashboard = ({ onNavigate }) => {
         if (!finalText || !finalText.trim()) return;
         setInterimText('');
         setIsListening(false);
+        // Cleanly stop listening while processing and speaking to avoid feedback loop
+        voiceAssistant.stopListening();
         const fullQ = finalText.trim();
         setInputText(fullQ);
         setVoiceStatusNotice(`🎙️ Full question captured: "${fullQ}" — Querying schemes...`);
@@ -633,15 +647,17 @@ export const ChatDashboard = ({ onNavigate }) => {
           setTimeout(() => setVoiceStatusNotice(''), 3500);
           if (handsFreeActiveRef.current) {
             setTimeout(() => {
-              if (handsFreeActiveRef.current) startContinuousVoiceListen();
-            }, 2000);
+              if (handsFreeActiveRef.current && !currentlySpeakingId) startContinuousVoiceListen();
+            }, 1500);
           }
           return;
         }
         if (handsFreeActiveRef.current && err !== 'aborted') {
+          // If no-speech or temporary silence, re-arm smoothly so citizen can speak at their pace
+          const retryDelay = err === 'no-speech' ? 400 : 1200;
           setTimeout(() => {
-            if (handsFreeActiveRef.current) startContinuousVoiceListen();
-          }, 1500);
+            if (handsFreeActiveRef.current && !currentlySpeakingId) startContinuousVoiceListen();
+          }, retryDelay);
         }
       },
       onEnd: () => {
@@ -714,9 +730,30 @@ export const ChatDashboard = ({ onNavigate }) => {
       onResult: (finalText) => {
         setInterimText('');
         setIsListening(false);
+        voiceAssistant.stopListening();
         if (finalText && finalText.trim()) {
           const text = finalText.trim();
           setInputText(text); // Always display the question in the chatbox
+
+          // Auto-detect language dynamically from recognized speech
+          if (
+            /[\u0C00-\u0C7F]/.test(text) ||
+            /\b(cheyali|cheyandi|arhatalu|pathakam|padhakam|dabbu|dabbulu|kavali|darakhastu|ento|telupandi|raithu|rythu)\b/i.test(text)
+          ) {
+            if (targetLanguage !== 'te') {
+              setTargetLanguage('te');
+              voiceAssistant.setLanguage('te');
+            }
+          } else if (
+            /[\u0900-\u097F]/.test(text) ||
+            /\b(kaise|karein|karna|patrata|kitna|kitne|paise|rupya|bataiye|chahiye|dastavez|kagaz|kisko|milega)\b/i.test(text)
+          ) {
+            if (targetLanguage !== 'hi') {
+              setTargetLanguage('hi');
+              voiceAssistant.setLanguage('hi');
+            }
+          }
+
           if (autoSendVoice) {
             setVoiceStatusNotice(`🎙️ Full question captured: "${text}" — Querying schemes...`);
             handleSendMessage(text, true);

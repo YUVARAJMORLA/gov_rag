@@ -56,8 +56,8 @@ export const sessionAPI = {
 
 // Chat & Feedback Endpoints
 export const chatAPI = {
-  sendQuery: (sessionId, query, model, numResults, targetLanguage = 'en') =>
-    api.post('/chat/query', { sessionId, query, model, numResults, targetLanguage }),
+  sendQuery: (sessionId, query, model, numResults, targetLanguage = 'en', isVoice = false) =>
+    api.post('/chat/query', { sessionId, query, model, numResults, targetLanguage, isVoice }),
   submitFeedback: (questionId, rating, feedbackText, sessionId) =>
     api.post('/chat/feedback', { questionId, rating, feedbackText, sessionId }),
   synthesizeSpeech: (text, targetLanguage = 'en', voiceGender = 'Female', isNovaSonic = false) =>
