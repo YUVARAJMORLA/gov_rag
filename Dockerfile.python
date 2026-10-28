@@ -1,0 +1,31 @@
+# ==============================================================================
+# Python RAG & AI Bridge Container
+# ==============================================================================
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHON_BRIDGE_PORT=5001
+
+WORKDIR /app
+
+# Install system utilities
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application files
+COPY python_bridge.py db_connector.py rag_service.py guardrails.py tts_service.py nova_live_session.py ./
+
+EXPOSE 5001
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:5001/health || exit 1
+
+CMD ["python", "python_bridge.py"]
+

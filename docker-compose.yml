@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. MongoDB Database Service
+  # ----------------------------------------------------------------------------
+  mongo:
+    image: mongo:7-jammy
+    container_name: gov-rag-mongo
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27017:27017"
+    networks:
+      - gov-net
+
+  # ----------------------------------------------------------------------------
+  # 2. Python RAG & Foundation Model AI Bridge
+  # ----------------------------------------------------------------------------
+  python-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    container_name: gov-rag-python-bridge
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PYTHON_BRIDGE_PORT=5001
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "5001:5001"
+    networks:
+      - gov-net
+
+  # ----------------------------------------------------------------------------
+  # 3. Node.js MERN Backend & React Client Host
+  # ----------------------------------------------------------------------------
+  mern-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: gov-rag-mern-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=5000
+      - PYTHON_BRIDGE_URL=http://python-bridge:5001
+      - MONGO_URI=mongodb://mongo:27017/gov_rag_mern
+      - NODE_ENV=production
+    ports:
+      - "5000:5000"
+    depends_on:
+      - mongo
+      - python-bridge
+    networks:
+      - gov-net
+
+volumes:
+  mongo_data:
+
+networks:
+  gov-net:
+    driver: bridge
+

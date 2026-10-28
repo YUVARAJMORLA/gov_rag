@@ -1,0 +1,33 @@
+1. rag_catalog.rag_gov_schema.user_queries
+- question_id: STRING (UUID) -> str(uuid.uuid4())
+- user_question: STRING -> User's input (PII-masked)
+- llm_answer: STRING -> LLM response
+- timestamp: TIMESTAMP -> current_timestamp()
+- batch_id: STRING -> Hardcoded BATCH_ID constant
+
+2. rag_catalog.rag_gov_schema.rag_observability
+- observability_id: STRING (UUID) -> str(uuid.uuid4())
+- question_id: STRING (UUID) -> From rag_query()
+- latency_ms: DOUBLE -> (time.time() - t0) * 1000
+- input_tokens: INT -> llm.usage.prompt_tokens
+- output_tokens: INT -> llm.usage.completion_tokens
+- input_cost: DOUBLE -> (input_tokens / 1000) * 0.0007
+- output_cost: DOUBLE -> (output_tokens / 1000) * 0.0008
+- llm_able_to_answer: BOOLEAN -> check_llm_answering(answer)
+- timestamp: TIMESTAMP -> current_timestamp()
+
+3. rag_catalog.rag_gov_schema.rag_retrieval_logs
+- log_id: STRING (UUID) -> str(uuid.uuid4())
+- question_id: STRING (UUID) -> From rag_query()
+- retrieved_chunk_ids: STRING (JSON) -> json.dumps(cids)
+- retrieved_scores: STRING (JSON) -> json.dumps(scores)
+- retrieved_texts: STRING (JSON) -> json.dumps([t[:500] for t in texts])
+- num_retrieved: INT -> len(cids)
+- timestamp: TIMESTAMP -> current_timestamp()
+
+4. rag_catalog.rag_gov_schema.rag_feedback
+- feedback_id: STRING (UUID) -> str(uuid.uuid4())
+- question_id: STRING (UUID) -> From session state result
+- user_feedback: STRING -> f"rating_{rating}"
+- rating: INT -> Streamlit slider (1-5)
+- timestamp: TIMESTAMP -> current_timestamp()

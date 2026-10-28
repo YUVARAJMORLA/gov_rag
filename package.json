@@ -1,0 +1,14 @@
+{
+  "name": "gov-rag-mern-platform",
+  "version": "1.0.0",
+  "description": "Production-Grade MERN Enterprise RAG & Voice AI Platform with Databricks Unity Catalog and AWS Bedrock",
+  "scripts": {
+    "install:all": "npm install && npm --prefix backend install && npm --prefix frontend install",
+    "build": "npm --prefix frontend run build",
+    "build:client": "npm --prefix frontend run build",
+    "start": "node backend/src/server.js",
+    "server": "node backend/src/server.js",
+    "python": "python python_bridge.py",
+    "client": "npm --prefix frontend run dev"
+  }
+}

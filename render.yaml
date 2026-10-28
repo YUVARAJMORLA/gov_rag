@@ -1,0 +1,53 @@
+services:
+  - type: web
+    name: govassist-rag-platform
+    env: docker
+    dockerfilePath: Dockerfile
+    plan: starter # or free
+    region: oregon # or ohio
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PYTHON_BRIDGE_URL
+        value: http://127.0.0.1:5001
+      - key: MONGO_URI
+        sync: false # Set in Render dashboard (e.g. MongoDB Atlas)
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DATABRICKS_SERVER_HOSTNAME
+        sync: false
+      - key: DATABRICKS_TOKEN
+        sync: false
+      - key: WAREHOUSE_ID
+        sync: false
+      - key: CATALOG
+        value: rag_catalog
+      - key: SCHEMA
+        value: rag_gov_schema
+      - key: BATCH_ID
+        value: cb2a68fa-2e95-457b-b017-86cee436fa48
+      - key: DATABRICKS_VECTOR_SEARCH_ENDPOINT
+        value: rag-gov-endpoint
+      - key: DATABRICKS_INDEX_NAME
+        value: rag_catalog.rag_gov_schema.gold_vector_index
+      - key: EMBEDDING_MODEL
+        value: databricks-gte-large-en
+      - key: Databricks_LLM_MODEL
+        value: databricks-meta-llama-3-3-70b-instruct
+      - key: AWS_REGION
+        value: us-east-1
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: BEDROCK_MODEL_1
+        value: google.gemma-3-12b-it
+      - key: BEDROCK_MODEL_2
+        value: nvidia.nemotron-super-3-120b
+      - key: BEDROCK_MODEL_3
+        value: mistral.devstral-2-123b
+      - key: BEDROCK_MODEL_4
+        value: amazon.nova-2-5-sonic
+

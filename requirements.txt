@@ -1,0 +1,28 @@
+# Web Framework & Microservice API Bridge
+flask>=3.0.0
+flask-cors>=4.0.0
+gunicorn>=21.2.0
+streamlit>=1.35.0
+
+# Databricks Vector Search & SDK
+databricks-vectorsearch>=0.40
+databricks-sdk>=0.28.0
+
+# AWS Bedrock & Foundation Model Inference
+boto3>=1.34.0
+botocore>=1.34.0
+aws-sdk-bedrock-runtime
+smithy-aws-core
+smithy-http
+awscrt
+
+# Speech Synthesis (TTS) & Edge Neural Audio
+edge-tts>=6.1.0
+gtts>=2.5.0
+
+# Audio Capture (Optional / Local Microphone)
+pyaudio>=0.2.13; sys_platform == 'win32'
+
+# Utilities & Networking
+python-dotenv>=1.0.0
+requests>=2.31.0

@@ -1,0 +1,236 @@
+================================================================================
+           GOVERNMENT SCHEMES RAG & MULTIMODAL VOICE AI - RUNBOOK
+================================================================================
+
+This document provides a comprehensive overview of the repository architecture,
+each file's purpose, how Databricks is connected and utilized, and how the end-to-end
+text and voice RAG pipelines operate.
+
+--------------------------------------------------------------------------------
+1. ARCHITECTURE OVERVIEW & HOW DATABRICKS CONNECTS
+--------------------------------------------------------------------------------
+The application is an enterprise-grade Governance and Scheme Information Assistant
+combining Databricks Lakehouse (Unity Catalog & Vector Search) with AWS Bedrock
+foundation models and Amazon Nova 2.5 Sonic for live voice interaction.
+
+How Databricks connects across the project:
+1. Databricks WorkspaceClient (databricks-sdk):
+   - Authenticates using DATABRICKS_SERVER_HOSTNAME and DATABRICKS_TOKEN.
+   - Connects to a serverless/pro SQL Warehouse via WAREHOUSE_ID.
+   - Executes SQL statements using Statement Execution API (w.statement_execution.execute_statement).
+   - Manages four governance and observability tables in Unity Catalog:
+     `rag_catalog.rag_gov_schema.user_queries`
+     `rag_catalog.rag_gov_schema.rag_observability`
+     `rag_catalog.rag_gov_schema.rag_retrieval_logs`
+     `rag_catalog.rag_gov_schema.rag_feedback`
+
+2. Databricks Model Serving (Embeddings & Fallback LLM):
+   - Query Embeddings: Calls Databricks Serving Endpoint `databricks-gte-large-en`
+     (via w.serving_endpoints.query or direct REST invocation) to convert questions
+     into dense vector embeddings.
+   - Fallback LLM: If AWS Bedrock endpoints fail, the system falls back to
+     `databricks-meta-llama-3-3-70b-instruct` hosted on Databricks Model Serving.
+
+3. Databricks Vector AI Search:
+   - Queries `rag_catalog.rag_gov_schema.gold_vector_index` hosted on endpoint
+     `rag-gov-endpoint` using Databricks VectorSearchClient similarity_search.
+   - Retrieves top-k relevant scheme document chunks with cosine similarity scores.
+
+--------------------------------------------------------------------------------
+2. DETAILED FILE BREAKDOWN
+--------------------------------------------------------------------------------
+
+1. db_connector.py (Databricks Connection & SQL Execution Engine)
+-----------------------------------------------------------------
+• Purpose: Serves as the central bridge between the Python application and
+  Databricks SQL Warehouse & Unity Catalog.
+• How it connects to Databricks:
+  - Reads DATABRICKS_SERVER_HOSTNAME, DATABRICKS_TOKEN, CATALOG, SCHEMA, and
+    WAREHOUSE_ID from .env.
+  - Initializes `w = WorkspaceClient(host=..., token=...)`.
+  - `run_sql(stmt)`: Uses `w.statement_execution.execute_statement()` with a 50s
+    timeout to execute queries directly on the Databricks SQL Warehouse without
+    requiring ODBC/JDBC drivers.
+• Logging Functions:
+  - `log_user_query(qid, q, ans, bid)`: Inserts user question (PII-masked), LLM
+    response, timestamp, and current batch_id into `{DB}.user_queries`.
+  - `log_observability(...)`: Logs latency_ms, input/output token counts, dynamic
+    input/output costs, llm_able_to_answer flag, injection_detected flag,
+    pii_masked flag, and masked question into `{DB}.rag_observability`.
+  - `log_retrieval(...)`: Serializes retrieved chunk IDs, similarity scores, and
+    truncated chunk texts to JSON and inserts into `{DB}.rag_retrieval_logs`.
+  - `log_feedback(fid, qid, fb, rating)`: Records 1-5 star user feedback ratings
+    and comments into `{DB}.rag_feedback`.
+• Connection Testing & Diagnostics:
+  - `test_databricks_platform()`: Executes `SELECT 1` on the SQL Warehouse to verify
+    connectivity and measure latency.
+  - `test_databricks_tables()`: Runs a fast unified UNION ALL query to verify the
+    existence and live row counts of all 4 governance tables.
+  - `test_vector_search_endpoint()`: Checks the Databricks Vector Search endpoint
+    status (`ONLINE`) and validates index accessibility.
+  - `_get_latest_batch_id()`: Dynamically queries `{DB}.gold_vector_embeddings` to
+    fetch the active pipeline batch ID.
+
+2. rag_service.py (RAG Pipeline Orchestrator & Multi-Model Inference)
+---------------------------------------------------------------------
+• Purpose: Coordinates the entire Retrieval-Augmented Generation flow, model
+  selection, dynamic pricing calculation, and governance logging.
+• Key Workflows:
+  - `get_databricks_embedding(query_text)`: Sends question to Databricks serving
+    endpoint (`databricks-gte-large-en`) to compute query embedding vectors.
+  - `query_databricks_vector_search(query_text, num_results)`: Uses computed query
+    vector to query `gold_vector_index` via VectorSearchClient.similarity_search,
+    returning chunk IDs, scores, and text excerpts with source filenames.
+  - `invoke_bedrock_converse(...)`: Invokes AWS Bedrock Converse API with strict
+    enterprise system instructions (strict context grounding, refusal for
+    out-of-scope non-scheme topics, Hindi/English terminology synthesis).
+  - `invoke_databricks_llm(...)`: Fallback generator querying Databricks Foundation
+    Model (`databricks-meta-llama-3-3-70b-instruct`).
+  - `generate_with_fallback(...)`: Tries prioritized Bedrock models (Gemma 3 12B,
+    Nemotron 120B, Mistral Devstral 123B, Nova Sonic); if all fail or are
+    unavailable, automatically cascades to Databricks Llama 3.3.
+  - `calculate_turn_cost(...)`: Dynamically computes input and output costs per
+    model without hardcoded constants, factoring in token pricing and Nova Sonic
+    bidirectional audio streaming seconds.
+  - `execute_rag_pipeline(...)`: End-to-end wrapper performing: Guardrails ->
+    Vector Search -> Model Generation -> Quality Validation -> Cost Calculation ->
+    Logging to Databricks tables.
+
+3. guardrails.py (Security, Privacy & Quality Filters)
+------------------------------------------------------
+• Purpose: Safeguards user privacy and system security before queries reach LLMs
+  or database storage.
+• Key Components:
+  - `mask_pii(text)`: Scans for sensitive data using compiled regular expressions
+    for Indian Aadhaar numbers, PAN cards, phone numbers (+91), email addresses,
+    credit/debit cards, SSNs, and names. Returns masked text and a boolean flag.
+  - `detect_prompt_injection(text)`: Inspects incoming text for adversarial jailbreak
+    patterns (e.g., "ignore previous instructions", "act as", "system prompt",
+    "dan mode", "developer mode").
+  - `check_llm_answering(ans)`: Evaluates model responses against a negative
+    refusal phrase dictionary to verify whether the model genuinely answered or
+    properly refused an out-of-scope question.
+
+4. nova_live_session.py (Amazon Nova 2.5 Sonic Live Voice Client)
+-----------------------------------------------------------------
+• Purpose: Powers real-time, low-latency, bidirectional speech-to-speech
+  conversations using Amazon Nova 2.5 Sonic.
+• How it works:
+  - `SimpleNovaSonic`: Uses AWS Bedrock's bidirectional streaming API
+    (`invoke_model_with_bidirectional_stream`) to open a duplex streaming session.
+  - Audio Capture: Captures microphone input at 16,000 Hz (16-bit mono PCM) using
+    PyAudio and streams chunks as base64-encoded audioInput events.
+  - Audio Playback: Receives Nova Sonic's streaming audio output at 24,000 Hz PCM
+    and queues it for real-time playback via PyAudio.
+  - Bidirectional Events: Manages sessionStart, promptStart, contentStart,
+    audioInput, contentEnd, and promptEnd events.
+  - Graceful Turn Finalization: When ending a session, signals `end_audio_input`
+    and waits up to 2.5 seconds for in-flight speech transcription tokens before
+    closing the stream.
+  - `LiveNovaSonicManager`: Threaded manager running an asyncio event loop in the
+    background so the Streamlit UI remains responsive while listening and speaking.
+
+5. app.py (Streamlit Web Dashboard & User Interface)
+-----------------------------------------------------
+• Purpose: Provides the rich front-end user experience, interactive controls, and
+  observability displays.
+• Key Sections:
+  - Sidebar:
+    * Displays active Databricks Catalog, Schema, and Batch ID.
+    * "🧪 Test Connections" button: Triggers real-time health checks for Databricks
+      Platform (SQL Warehouse latency), 4 Unity Catalog tables (live row counts),
+      and Vector Search Endpoint status (`ONLINE`).
+    * Model configuration selector (Auto, Gemma 3, Nemotron, Mistral, Nova Sonic,
+      Databricks Llama 3.3).
+    * Retrieval chunk count slider (1-8 chunks).
+  - Tab 1 ("💬 Schemes Q&A & Document Search"):
+    * Text and audio query submission.
+    * Guardrail indicators (PII Masked badge, Prompt Injection warning).
+    * Dynamic execution telemetry (Model used, latency ms, token counts, dynamic cost).
+    * Expandable source document chunks with similarity scores.
+    * Interactive 1-5 star user feedback widget logging to `rag_feedback`.
+  - Tab 2 ("🎙️ Live Speech-to-Speech"):
+    * One-click "▶️ Start Live Session" and "⏹️ End Session" buttons.
+    * Live bidirectional speech conversation with Amazon Nova 2.5 Sonic.
+    * Displays user spoken transcription and assistant response.
+    * Automatically logs live voice turns to Databricks `user_queries`,
+      `rag_observability`, and `rag_retrieval_logs` with multimodal audio streaming
+      cost calculations.
+
+6. tables.txt (Database Schema Specification)
+---------------------------------------------
+• Defines the schema and column specifications for the 4 Unity Catalog tables:
+  1. `user_queries`: question_id, user_question, llm_answer, timestamp, batch_id.
+  2. `rag_observability`: observability_id, question_id, latency_ms, input_tokens,
+     output_tokens, input_cost, output_cost, llm_able_to_answer, injection_detected,
+     pii_masked, masked_question, timestamp.
+  3. `rag_retrieval_logs`: log_id, question_id, retrieved_chunk_ids (JSON),
+     retrieved_scores (JSON), retrieved_texts (JSON), num_retrieved, timestamp.
+  4. `rag_feedback`: feedback_id, question_id, user_feedback, rating, timestamp.
+
+7. requirements.txt (Python Dependencies)
+------------------------------------------
+• Lists all required packages:
+  - streamlit: Web application framework.
+  - databricks-sdk & databricks-vectorsearch: Databricks workspace, statement
+    execution, model serving, and vector index querying.
+  - boto3 & botocore: AWS Bedrock Converse API and Polly client.
+  - aws-sdk-bedrock-runtime, smithy-aws-core, smithy-http, awscrt: AWS Bedrock
+    bidirectional streaming client for Nova Sonic.
+  - pyaudio: Microphone input capture and speaker output playback.
+  - python-dotenv & requests: Configuration management and REST fallbacks.
+
+8. .env / env.example (Configuration & Credentials)
+----------------------------------------------------
+• Stores environment variables required for runtime operation:
+  - Databricks: DATABRICKS_SERVER_HOSTNAME, DATABRICKS_TOKEN, WAREHOUSE_ID,
+    CATALOG, SCHEMA, BATCH_ID, DATABRICKS_VECTOR_SEARCH_ENDPOINT, DATABRICKS_INDEX_NAME,
+    EMBEDDING_MODEL, Databricks_LLM_MODEL.
+  - AWS Bedrock: AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+    BEDROCK_MODEL_1, BEDROCK_MODEL_2, BEDROCK_MODEL_3, BEDROCK_MODEL_4.
+  - Pricing Overrides (Optional): PRICE_GEMMA_*, PRICE_NEMOTRON_*, PRICE_NOVA_*, etc.
+
+--------------------------------------------------------------------------------
+3. END-TO-END DATA FLOW SUMMARY
+--------------------------------------------------------------------------------
+
+Text / Audio File Query Flow (Tab 1):
+[User Question]
+       │
+       ▼
+[guardrails.py] ──> Mask PII (Aadhaar, PAN, Phone) & Check Prompt Injection
+       │
+       ▼
+[rag_service.py] ──> Generate Embedding via Databricks `databricks-gte-large-en`
+       │
+       ▼
+[db_connector.py] ──> Query Databricks Vector Search `gold_vector_index`
+       │
+       ▼
+[Bedrock Converse / Databricks LLM] ──> Generate grounded answer with scheme context
+       │
+       ▼
+[Cost & Quality Calculation] ──> Dynamic model-specific token pricing & refusal check
+       │
+       ▼
+[Databricks Logging via Statement Execution]
+  ├──> {DB}.user_queries (Question, answer, batch_id)
+  ├──> {DB}.rag_observability (Latency, tokens, dynamic costs, security flags)
+  └──> {DB}.rag_retrieval_logs (Retrieved chunk IDs, scores, texts)
+
+Live Voice Session Flow (Tab 2):
+[Microphone Input] ──> PyAudio (16kHz PCM)
+       │
+       ▼
+[nova_live_session.py] ──> Bedrock Bidirectional Stream (`amazon.nova-2-5-sonic`)
+       │
+       ├──> Bedrock synthesizes streaming voice ──> PyAudio (24kHz PCM Playback)
+       └──> Bedrock transcribes user speech & assistant text tokens
+       │
+       ▼
+[End Session Graceful Sync] ──> Dynamic audio streaming cost calculated
+       │
+       ▼
+[Databricks Logging via Statement Execution] ──> Synced to `user_queries` & `rag_observability`
+
+--------------------------------------------------------------------------------

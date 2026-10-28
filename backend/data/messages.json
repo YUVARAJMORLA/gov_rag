@@ -1,0 +1,88 @@
+[
+  {
+    "_id": "480a1255-7490-48ab-996d-f3bc54bd6084",
+    "sessionId": "635a1654-72ef-4ed2-97da-c1d6d709704e",
+    "userId": "9361e17f-1e32-4312-9bd4-c517794a30d0",
+    "questionId": "fdff96c5-5e8e-4dcf-baa0-c81f9045ddb1",
+    "role": "user",
+    "content": "What is Ayushman Bharat?",
+    "maskedContent": "What is Ayushman Bharat?",
+    "createdAt": "2026-10-21T07:14:38.988Z"
+  },
+  {
+    "_id": "565980dd-7bb8-4f3f-8076-0e99740826e1",
+    "sessionId": "635a1654-72ef-4ed2-97da-c1d6d709704e",
+    "userId": "9361e17f-1e32-4312-9bd4-c517794a30d0",
+    "questionId": "43cc9125-5622-49fc-8835-bce2709741bd",
+    "role": "assistant",
+    "content": "Ayushman Bharat Digital Mission (ABDM) is a flagship scheme of the Government of India aimed at building an integrated digital health ecosystem in the country. It is an initiative by the Government of India (GoI) to achieve a seamless exchange of health information among various stakeholders of the healthcare sector. The National Health Authority (NHA), under the Ministry of Health and Family Welfare, implements ABDM.",
+    "maskedContent": "What is Ayushman Bharat?",
+    "modelUsed": "google.gemma-3-12b-it",
+    "retrievedChunks": [
+      "Source (dbfs:/Volumes/rag_catalog/rag_gov_schema/rag_gov_files/ABDM.pdf):\nसत्यमेव जयते सत्यमेव जयते national health authority Ayushman Bharat Digital Mission Building Digital Health Ecosystem Join India’s Digital Health Revolution with ABDM Ayushman Bharat Digital Mission (ABDM) Ayushman Bharat Digital Mission is an initiative by the Government of India (GoI) to achieve a seamless exchange of health information among various stakeholders of the healthcare sector. ABDM aims to build the digital health backbone of the country necessary to bring all stakeholders together in ONE comm",
+      "Source (dbfs:/Volumes/rag_catalog/rag_gov_schema/rag_gov_files/ayushman_bharath.pdf):\nसत्यमेव जयते national health authority Kudumbashree Digital Mission Building Digital Health Ecosystem AYUSHMAN BHARAT DIGITAL MISSION (ABDM) Ayushman Bharat Digital Mission (ABDM) is a flagship scheme of the Government of India aimed at building an integrated digital health ecosystem in the country. ABDM aims to build the digital health backbone of the country necessary to bring all stakeholders together in one common ecosystem. Main Components of ABDM i Ayushman Bharat Health Account (ABHA) Unique health i",
+      "Source (dbfs:/Volumes/rag_catalog/rag_gov_schema/rag_gov_files/Indian_Central_Government_Schemes_Guide.pdf):\n3 INDIA / CITIZEN & ENTERPRISE REFERENCE 01 ABDM / ABHA AYUSHMAN BHARAT DIGITAL MISSION Purpose, authority and benefits The National Health Authority (NHA), under the Ministry of Health and Family Welfare, implements ABDM. It develops interoperable digital health infrastructure, including ABHA health accounts and registries of professionals and facilities. Participation is voluntary. [1] Citizens can access and share linked prescriptions, diagnostic reports and discharge summaries with healthcare providers ",
+      "Source (dbfs:/Volumes/rag_catalog/rag_gov_schema/rag_gov_files/ABDM.pdf):\nary to bring all stakeholders together in ONE common ecosystem. Components of ABDM i Ayushman Bharat Health Account (ABHA) Unique Health Identifier for all individuals called as Ayushman Bharat Health Account. H Health Facility Registry (HFR) An updated and comprehensive registry of verified public and private health facilities like hospitals, clinics, labs, pharmacies etc. UHI Unified Health Interface (UHI) An open network for the seamless exchange of health information among users and healthcare providers",
+      "Source (dbfs:/Volumes/rag_catalog/rag_gov_schema/rag_gov_files/Indian_Central_Government_Schemes_Guide.pdf):\ndual application window or a funding allocation. The guideline OM is dated 12 December 2023 and takes effect from 21 November 2023; its full PDF could not be retrieved. [5] [6] [9] CENTRAL GOVERNMENT SCHEMES Verified-source guide 18 Oct 2026 5 INDIA / CITIZEN & ENTERPRISE REFERENCE 03 Ayushman Bharat PM-JAY PRADHAN MANTRI JAN AROGYA YOJANA Purpose, authority and benefits NHA, Ministry of Health and Family Welfare, administers PM-JAY with State/UT agencies. It provides cashless secondary and tertiary hospita"
+    ],
+    "retrievedScores": [
+      0.004785861,
+      0.0044267992,
+      0.0036293133,
+      0.0029882174,
+      0.0029720757
+    ],
+    "metrics": {
+      "latencyMs": 14485.539197921753,
+      "inputTokens": 935,
+      "outputTokens": 81,
+      "inputCost": 0.00014025,
+      "outputCost": 0.0000162,
+      "llmAbleToAnswer": true,
+      "piiMasked": false,
+      "injectionDetected": false
+    },
+    "createdAt": "2026-10-21T07:15:12.917Z"
+  },
+  {
+    "_id": "c239bd06-9c6f-419b-bd6b-e0846697c907",
+    "sessionId": "e2a49bfa-5e44-4c69-8b74-095b6d3a32af",
+    "userId": "27fc35fb-0178-4290-914c-a2f119ed22bd",
+    "questionId": "1d66c8d6-bd36-4d5c-9961-35bcca9df200",
+    "role": "user",
+    "content": "What is Ayushman Bharat?",
+    "maskedContent": "What is Ayushman Bharat?",
+    "createdAt": "2026-10-21T07:17:48.552Z"
+  },
+  {
+    "_id": "8c942284-e4ec-4af2-a4fb-86b6277a3f49",
+    "sessionId": "e2a49bfa-5e44-4c69-8b74-095b6d3a32af",
+    "userId": "27fc35fb-0178-4290-914c-a2f119ed22bd",
+    "questionId": "c1668ac7-e8ce-4c9f-9d64-10784c9e2211",
+    "role": "assistant",
+    "content": "Ayushman Bharat Digital Mission (ABDM) is a flagship scheme of the Government of India aimed at building an integrated digital health ecosystem in the country. ABDM aims to build the digital health backbone of the country necessary to bring all stakeholders together in one common ecosystem. The National Health Authority (NHA), under the Ministry of Health and Family Welfare, implements ABDM. It develops interoperable digital health infrastructure, including ABHA health accounts and registries of professionals and facilities. Participation is voluntary.",
+    "maskedContent": "What is Ayushman Bharat?",
+    "modelUsed": "google.gemma-3-12b-it",
+    "retrievedChunks": [
+      "Source (dbfs:/Volumes/rag_catalog/rag_gov_schema/rag_gov_files/ABDM.pdf):\nसत्यमेव जयते सत्यमेव जयते national health authority Ayushman Bharat Digital Mission Building Digital Health Ecosystem Join India’s Digital Health Revolution with ABDM Ayushman Bharat Digital Mission (ABDM) Ayushman Bharat Digital Mission is an initiative by the Government of India (GoI) to achieve a seamless exchange of health information among various stakeholders of the healthcare sector. ABDM aims to build the digital health backbone of the country necessary to bring all stakeholders together in ONE comm",
+      "Source (dbfs:/Volumes/rag_catalog/rag_gov_schema/rag_gov_files/ayushman_bharath.pdf):\nसत्यमेव जयते national health authority Kudumbashree Digital Mission Building Digital Health Ecosystem AYUSHMAN BHARAT DIGITAL MISSION (ABDM) Ayushman Bharat Digital Mission (ABDM) is a flagship scheme of the Government of India aimed at building an integrated digital health ecosystem in the country. ABDM aims to build the digital health backbone of the country necessary to bring all stakeholders together in one common ecosystem. Main Components of ABDM i Ayushman Bharat Health Account (ABHA) Unique health i",
+      "Source (dbfs:/Volumes/rag_catalog/rag_gov_schema/rag_gov_files/Indian_Central_Government_Schemes_Guide.pdf):\n3 INDIA / CITIZEN & ENTERPRISE REFERENCE 01 ABDM / ABHA AYUSHMAN BHARAT DIGITAL MISSION Purpose, authority and benefits The National Health Authority (NHA), under the Ministry of Health and Family Welfare, implements ABDM. It develops interoperable digital health infrastructure, including ABHA health accounts and registries of professionals and facilities. Participation is voluntary. [1] Citizens can access and share linked prescriptions, diagnostic reports and discharge summaries with healthcare providers "
+    ],
+    "retrievedScores": [
+      0.004785861,
+      0.0044267992,
+      0.0036293133
+    ],
+    "metrics": {
+      "latencyMs": 4968.403339385986,
+      "inputTokens": 633,
+      "outputTokens": 99,
+      "inputCost": 0.00009494999999999999,
+      "outputCost": 0.000019800000000000004,
+      "llmAbleToAnswer": true,
+      "piiMasked": false,
+      "injectionDetected": false
+    },
+    "createdAt": "2026-10-21T07:18:02.774Z"
+  }
+]

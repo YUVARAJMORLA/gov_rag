@@ -1,0 +1,29 @@
+[
+  {
+    "_id": "9361e17f-1e32-4312-9bd4-c517794a30d0",
+    "username": "admin",
+    "fullName": "System Administrator",
+    "email": "admin@govschemes.gov",
+    "ssnHash": "$2a$10$w/Zit9qwTufcSxJ3E9xMaOKolvArGWzVyZuWbqyzVnKFaQDeOae52",
+    "ssnLast4": "0000",
+    "passwordHash": "$2a$10$bTj/Hj3IE4ElwdFLbJ2b3eWjigs1n/NC1gkuuJf6/MNFEUGUysCSm",
+    "role": "admin",
+    "isActive": true,
+    "createdAt": "2026-10-21T07:03:38.750Z",
+    "lastLogin": "2026-10-21T07:19:09.688Z"
+  },
+  {
+    "_id": "27fc35fb-0178-4290-914c-a2f119ed22bd",
+    "username": "citizen1",
+    "fullName": "Rajesh Sharma",
+    "email": "rajesh.sharma@example.com",
+    "ssnHash": "$2a$10$QmGaI.aU1C1Bdtbmoh8.hOr79emY/y4xKJ9oZ5OskG3m4eZD1hxBi",
+    "ssnLast4": "6789",
+    "passwordHash": "$2a$10$186EnVagIsqdkR15n.x7SuDPE7ce1U7mEYGqq2cKlo5hG2zpYVT6S",
+    "role": "user",
+    "isActive": true,
+    "createdAt": "2026-10-21T07:03:38.949Z",
+    "lastLogin": "2026-10-21T07:18:16.515Z",
+    "updatedAt": "2026-10-21T07:18:31.463Z"
+  }
+]
