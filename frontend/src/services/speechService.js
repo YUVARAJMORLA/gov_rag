@@ -2,6 +2,21 @@
 // Supports dynamic multi-voice selection (Male / Female accents), Native Neural Hindi (hi-IN) & Telugu (te-IN) Beta Voices, and Nova Sonic Voice
 import { chatAPI } from './api';
 
+// Intelligent deduplication to prevent mobile Android Chrome Web Speech stutter
+// Fixes "what is what is what is what is what is databricks" -> "what is databricks"
+export function cleanSpeechRepetitions(text) {
+  if (!text) return '';
+  let s = text.trim();
+  // 1. Collapse repeated consecutive identical single words: "what what what" -> "what", "is is" -> "is"
+  s = s.replace(/\b(\S+)(?:\s+\1\b)+/gi, '$1');
+  // 2. Collapse repeated 2-to-6 word phrases
+  for (let n = 6; n >= 2; n--) {
+    const pattern = new RegExp(`((?:\\S+\\s+){${n - 1}}\\S+)(?:\\s+\\1)+`, 'gi');
+    s = s.replace(pattern, '$1');
+  }
+  return s.trim();
+}
+
 export class VoiceAssistant {
   constructor() {
     this.activeRecognition = null;
@@ -279,7 +294,7 @@ export class VoiceAssistant {
   }
 
   // 1. Start Voice Recognition (Speech-to-Text)
-  startListening({ onResult, onInterim, onError, onEnd, onStart, lang = null }) {
+  startListening({ onResult, onInterim, onError, onEnd, onStart, lang = null, continuous = null }) {
     const SpeechRecognition = typeof window !== 'undefined'
       ? (window.SpeechRecognition || window.webkitSpeechRecognition)
       : null;
@@ -306,8 +321,16 @@ export class VoiceAssistant {
       recognition.lang = 'en-IN';
     }
 
-    // Use continuous = true so brief natural pauses (e.g., between "What is" and "PM-KISAN") do not drop words or abort
-    recognition.continuous = true;
+    // Mobile Detection: On Android Chrome, continuous = true triggers Chromium Bug 529685
+    // where utterances are duplicated repeatedly ("what is what is what is what is what is databricks").
+    // We disable continuous mode on mobile devices so single utterances capture cleanly and stop naturally.
+    const isMobileDevice = typeof navigator !== 'undefined' && (
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+      (typeof window !== 'undefined' && window.innerWidth < 768) ||
+      (typeof navigator.maxTouchPoints === 'number' && navigator.maxTouchPoints > 1)
+    );
+
+    recognition.continuous = continuous !== null ? continuous : (!isMobileDevice);
     recognition.interimResults = true;
     recognition.maxAlternatives = 1;
 
@@ -317,7 +340,7 @@ export class VoiceAssistant {
 
     const deliverResult = (transcript) => {
       if (hasDeliveredResult) return;
-      const clean = (transcript || this.lastTranscript || '').trim();
+      const clean = cleanSpeechRepetitions((transcript || this.lastTranscript || '').trim());
       if (!clean) return;
       hasDeliveredResult = true;
       if (silenceTimer) {
@@ -331,12 +354,13 @@ export class VoiceAssistant {
 
     const resetSilenceTimer = () => {
       if (silenceTimer) clearTimeout(silenceTimer);
-      // Wait for 1300ms of quiet after citizen finishes speaking to ensure the full sentence is captured
+      // Wait for quiet after citizen finishes speaking to ensure the full sentence is captured
+      // 1000ms is responsive and prevents premature cuts
       silenceTimer = setTimeout(() => {
         if (this.lastTranscript && this.lastTranscript.trim() && !hasDeliveredResult) {
           deliverResult(this.lastTranscript.trim());
         }
-      }, 1300);
+      }, 1100);
     };
 
     recognition.onstart = () => {
@@ -349,7 +373,7 @@ export class VoiceAssistant {
       let assembledFinal = '';
       let assembledInterim = '';
 
-      // Assemble all finalized and interim chunks across event.results with clean single spaces
+      // Assemble all finalized and interim chunks across event.results
       for (let i = 0; i < event.results.length; ++i) {
         const item = event.results[i];
         const chunk = (item[0]?.transcript || '').trim();
@@ -362,7 +386,10 @@ export class VoiceAssistant {
         }
       }
 
-      const fullTranscript = (assembledFinal + (assembledInterim ? ' ' + assembledInterim : '')).trim();
+      // Assemble and run repetition sanitizer to eliminate any stutter/loop
+      let fullTranscript = (assembledFinal + (assembledInterim ? ' ' + assembledInterim : '')).trim();
+      fullTranscript = cleanSpeechRepetitions(fullTranscript);
+
       if (fullTranscript) {
         this.lastTranscript = fullTranscript;
         if (onInterim) {

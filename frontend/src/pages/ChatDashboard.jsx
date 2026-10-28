@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { sessionAPI, chatAPI } from '../services/api';
-import { voiceAssistant } from '../services/speechService';
+import { voiceAssistant, cleanSpeechRepetitions } from '../services/speechService';
 import {
   MessageSquare, Plus, Trash2, Edit2, Check, X, Send, Mic, MicOff,
   Volume2, VolumeX, Shield, User, LogOut, ChevronDown, ChevronRight,
@@ -334,6 +334,7 @@ export const ChatDashboard = ({ onNavigate }) => {
   };
 
   const handleSelectSession = (sId) => {
+    setIsMobileSidebarOpen(false);
     if (sId === activeSessionId) return;
     setActiveSessionId(sId);
     loadSessionMessages(sId);
@@ -355,6 +356,7 @@ export const ChatDashboard = ({ onNavigate }) => {
   };
 
   const handleCreateSession = async () => {
+    setIsMobileSidebarOpen(false);
     try {
       const res = await sessionAPI.createSession(`New Conversation`);
       if (res.data?.success) {
@@ -623,18 +625,19 @@ export const ChatDashboard = ({ onNavigate }) => {
         );
       },
       onInterim: (interim) => {
-        setInterimText(interim);
-        if (interim && interim.trim()) {
-          setInputText(interim.trim());
+        const cleaned = cleanSpeechRepetitions(interim || '');
+        setInterimText(cleaned);
+        if (cleaned && cleaned.trim()) {
+          setInputText(cleaned.trim());
         }
       },
       onResult: (finalText) => {
-        if (!finalText || !finalText.trim()) return;
+        const fullQ = cleanSpeechRepetitions(finalText || '').trim();
+        if (!fullQ) return;
         setInterimText('');
         setIsListening(false);
         // Cleanly stop listening while processing and speaking to avoid feedback loop
         voiceAssistant.stopListening();
-        const fullQ = finalText.trim();
         setInputText(fullQ);
         setVoiceStatusNotice(`🎙️ Full question captured: "${fullQ}" — Querying schemes...`);
         handleSendMessage(fullQ, true);
@@ -710,6 +713,7 @@ export const ChatDashboard = ({ onNavigate }) => {
     setVoiceStatusNotice('⏳ Initializing microphone...');
     voiceAssistant.startListening({
       lang: activeMicLang,
+      continuous: false, // Type 1 Push-to-Talk is single utterance, explicitly false to prevent repetition loops on mobile
       onStart: () => {
         setIsListening(true);
         setVoiceStatusNotice(
@@ -721,19 +725,20 @@ export const ChatDashboard = ({ onNavigate }) => {
         );
       },
       onInterim: (interim) => {
-        setInterimText(interim);
+        const cleaned = cleanSpeechRepetitions(interim || '');
+        setInterimText(cleaned);
         // Live stream recognized words into chatbox so citizen sees full question forming in real-time
-        if (interim && interim.trim()) {
-          setInputText(interim.trim());
+        if (cleaned && cleaned.trim()) {
+          setInputText(cleaned.trim());
         }
       },
       onResult: (finalText) => {
         setInterimText('');
         setIsListening(false);
         voiceAssistant.stopListening();
-        if (finalText && finalText.trim()) {
-          const text = finalText.trim();
-          setInputText(text); // Always display the question in the chatbox
+        const text = cleanSpeechRepetitions(finalText || '').trim();
+        if (text) {
+          setInputText(text); // Always display the cleaned question in the chatbox
 
           // Auto-detect language dynamically from recognized speech
           if (
@@ -887,21 +892,21 @@ export const ChatDashboard = ({ onNavigate }) => {
       <aside
         className={`chat-sidebar ${isMobileSidebarOpen ? 'open' : ''}`}
         style={{
-          width: isSidebarOpen ? '280px' : '0px',
-          minWidth: isSidebarOpen ? '280px' : '0px',
-          maxWidth: isSidebarOpen ? '280px' : '0px',
-          opacity: isSidebarOpen ? 1 : 0,
-          visibility: isSidebarOpen ? 'visible' : 'hidden',
+          width: (isSidebarOpen || isMobileSidebarOpen) ? '280px' : '0px',
+          minWidth: (isSidebarOpen || isMobileSidebarOpen) ? '280px' : '0px',
+          maxWidth: (isSidebarOpen || isMobileSidebarOpen) ? '280px' : '0px',
+          opacity: (isSidebarOpen || isMobileSidebarOpen) ? 1 : 0,
+          visibility: (isSidebarOpen || isMobileSidebarOpen) ? 'visible' : 'hidden',
           overflow: 'hidden',
           background: 'rgba(11, 15, 25, 0.95)',
-          borderRight: isSidebarOpen ? '1px solid var(--border-subtle)' : 'none',
+          borderRight: (isSidebarOpen || isMobileSidebarOpen) ? '1px solid var(--border-subtle)' : 'none',
           display: 'flex',
           flexDirection: 'column',
-          zIndex: 20,
+          zIndex: isMobileSidebarOpen ? 1000 : 20,
           transition: 'width 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease, visibility 0.25s ease'
         }}
       >
-        {/* Brand / Logo + ChatGPT Close Button */}
+        {/* Brand / Logo + Close Button */}
         <div style={{
           padding: '16px 16px',
           borderBottom: '1px solid var(--border-subtle)',
@@ -930,15 +935,19 @@ export const ChatDashboard = ({ onNavigate }) => {
                 GovAssist <span className="gradient-text-indigo">AI</span>
               </h2>
               <div style={{ fontSize: '10.5px', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-                MERN + Databricks + Bedrock
+                Digital India Citizen Portal
               </div>
             </div>
           </div>
 
-          {/* ChatGPT-style Close Button inside Sidebar */}
+          {/* Close Button (collapses drawer on mobile or sidebar on desktop) */}
           <button
             type="button"
-            onClick={toggleSidebar}
+            onClick={() => {
+              setIsMobileSidebarOpen(false);
+              setIsSidebarOpen(false);
+              localStorage.setItem('gov_rag_sidebar_open', 'false');
+            }}
             style={{
               background: 'rgba(255, 255, 255, 0.05)',
               border: '1px solid var(--border-subtle)',
@@ -954,7 +963,7 @@ export const ChatDashboard = ({ onNavigate }) => {
             }}
             onMouseEnter={(e) => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; }}
             onMouseLeave={(e) => { e.currentTarget.style.color = '#94a3b8'; e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; }}
-            title="Close sidebar (Ctrl+B)"
+            title="Close sidebar"
           >
             <PanelLeftClose size={17} />
           </button>
@@ -1142,7 +1151,8 @@ export const ChatDashboard = ({ onNavigate }) => {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          flexShrink: 0
+          flexShrink: 0,
+          paddingBottom: 'max(14px, env(safe-area-inset-bottom))'
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
             <div style={{
@@ -1176,17 +1186,27 @@ export const ChatDashboard = ({ onNavigate }) => {
           <button
             type="button"
             onClick={logout}
-            title="Log Out"
+            title="Log Out of GovAssist"
             style={{
-              background: 'none',
-              border: 'none',
-              color: '#94a3b8',
+              background: 'rgba(239, 68, 68, 0.12)',
+              border: '1px solid rgba(239, 68, 68, 0.35)',
+              color: '#f87171',
               cursor: 'pointer',
-              padding: '6px',
-              borderRadius: '6px'
+              padding: '6px 12px',
+              borderRadius: '7px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontSize: '12px',
+              fontWeight: 600,
+              flexShrink: 0,
+              transition: 'all 0.15s ease'
             }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(239, 68, 68, 0.22)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(239, 68, 68, 0.12)'; }}
           >
-            <LogOut size={16} />
+            <LogOut size={15} />
+            <span>Logout</span>
           </button>
         </div>
       </aside>
@@ -1209,59 +1229,81 @@ export const ChatDashboard = ({ onNavigate }) => {
           minHeight: '48px'
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            {/* When sidebar is collapsed, show Open Sidebar button and New Chat (ChatGPT pattern) */}
-            {!isSidebarOpen && (
-              <>
-                <button
-                  type="button"
-                  onClick={toggleSidebar}
-                  style={{
-                    background: 'rgba(99, 102, 241, 0.2)',
-                    border: '1px solid #818cf8',
-                    color: '#a5b4fc',
-                    borderRadius: '8px',
-                    padding: '6px 8px',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    transition: 'all 0.15s ease'
-                  }}
-                  title="Open sidebar (Ctrl+B)"
-                >
-                  <PanelLeft size={17} />
-                </button>
+            {/* Mobile Menu Button - Opens Sidebar Drawer on Phones/Tablets */}
+            <button
+              type="button"
+              className="mobile-header-menu-btn"
+              onClick={() => setIsMobileSidebarOpen(true)}
+              style={{
+                background: 'rgba(99, 102, 241, 0.2)',
+                border: '1px solid #818cf8',
+                color: '#a5b4fc',
+                borderRadius: '8px',
+                padding: '6px 9px',
+                cursor: 'pointer',
+                display: 'none',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'all 0.15s ease'
+              }}
+              title="Open Navigation Menu"
+            >
+              <Menu size={18} />
+            </button>
 
-                <button
-                  type="button"
-                  onClick={handleCreateSession}
-                  style={{
-                    background: 'rgba(30, 41, 59, 0.8)',
-                    border: '1px solid var(--border-medium)',
-                    color: '#cbd5e1',
-                    borderRadius: '8px',
-                    padding: '6px 10px',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '5px',
-                    fontSize: '12px',
-                    fontWeight: 600,
-                    transition: 'all 0.15s ease'
-                  }}
-                  onMouseEnter={(e) => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.borderColor = '#818cf8'; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.color = '#cbd5e1'; e.currentTarget.style.borderColor = 'var(--border-medium)'; }}
-                  title="New conversation"
-                >
-                  <Plus size={15} />
-                  <span>New Chat</span>
-                </button>
-              </>
+            {/* Desktop Sidebar Toggle Button (shown when collapsed) */}
+            {!isSidebarOpen && (
+              <button
+                type="button"
+                className="desktop-sidebar-toggle-btn"
+                onClick={toggleSidebar}
+                style={{
+                  background: 'rgba(99, 102, 241, 0.2)',
+                  border: '1px solid #818cf8',
+                  color: '#a5b4fc',
+                  borderRadius: '8px',
+                  padding: '6px 8px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  transition: 'all 0.15s ease'
+                }}
+                title="Open sidebar (Ctrl+B)"
+              >
+                <PanelLeft size={17} />
+              </button>
             )}
+
+            {/* New Chat Button */}
+            <button
+              type="button"
+              onClick={handleCreateSession}
+              style={{
+                background: 'rgba(30, 41, 59, 0.8)',
+                border: '1px solid var(--border-medium)',
+                color: '#cbd5e1',
+                borderRadius: '8px',
+                padding: '6px 10px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px',
+                fontSize: '12px',
+                fontWeight: 600,
+                transition: 'all 0.15s ease'
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.borderColor = '#818cf8'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = '#cbd5e1'; e.currentTarget.style.borderColor = 'var(--border-medium)'; }}
+              title="New conversation"
+            >
+              <Plus size={15} />
+              <span className="header-new-chat-text">New Chat</span>
+            </button>
           </div>
 
           <div className="header-controls-group" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            {/* Beta Regional Translation Toggle (Hindi & Telugu) */}
+            {/* Regional Translation Toggle (English / Hindi / Telugu) */}
             <div style={{
               display: 'flex',
               alignItems: 'center',
@@ -1272,16 +1314,6 @@ export const ChatDashboard = ({ onNavigate }) => {
               borderRadius: '6px'
             }}>
               <Globe size={13} color={targetLanguage !== 'en' ? '#fbbf24' : '#94a3b8'} />
-              <span style={{
-                fontSize: '9.5px',
-                fontWeight: 700,
-                padding: '1px 4px',
-                borderRadius: '3px',
-                background: targetLanguage !== 'en' ? '#f59e0b' : 'rgba(99, 102, 241, 0.25)',
-                color: targetLanguage !== 'en' ? '#000' : '#c7d2fe'
-              }}>
-                BETA
-              </span>
               <select
                 value={targetLanguage}
                 onChange={(e) => {
@@ -1297,292 +1329,15 @@ export const ChatDashboard = ({ onNavigate }) => {
                   outline: 'none',
                   cursor: 'pointer'
                 }}
-                title="Regional Language Translation (Beta: Hindi & Telugu for Text & Voice)"
+                title="Select Regional Language"
               >
-                <option value="en" style={{ background: '#0f172a', color: '#f8fafc' }}>English (Default)</option>
-                <option value="hi" style={{ background: '#0f172a', color: '#f8fafc' }}>🇮🇳 हिन्दी (Hindi - Beta)</option>
-                <option value="te" style={{ background: '#0f172a', color: '#f8fafc' }}>🇮🇳 తెలుగు (Telugu - Beta)</option>
+                <option value="en" style={{ background: '#0f172a', color: '#f8fafc' }}>English</option>
+                <option value="hi" style={{ background: '#0f172a', color: '#f8fafc' }}>🇮🇳 हिन्दी</option>
+                <option value="te" style={{ background: '#0f172a', color: '#f8fafc' }}>🇮🇳 తెలుగు</option>
               </select>
             </div>
 
-            {/* Theme & Color Palette Selector (All 8 Themes) */}
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '5px',
-              background: 'rgba(30, 41, 59, 0.85)',
-              border: '1px solid var(--border-medium)',
-              padding: '3px 8px',
-              borderRadius: '6px'
-            }}>
-              <Palette size={13} color="var(--accent-indigo-light, #818cf8)" />
-              <select
-                value={currentTheme}
-                onChange={(e) => handleThemeChange(e.target.value)}
-                style={{
-                  background: 'transparent',
-                  border: 'none',
-                  color: '#f8fafc',
-                  fontSize: '11.5px',
-                  outline: 'none',
-                  cursor: 'pointer'
-                }}
-                title="Select Theme / Color Scheme (8 Accessibility & Cultural Palettes)"
-              >
-                <option value="default-dark" style={{ background: '#0f172a', color: '#f8fafc' }}>🌙 Dark Navy (Enterprise)</option>
-                <option value="chatgpt-light" style={{ background: '#ffffff', color: '#0f172a' }}>☀️ Clean Light (White & Slate)</option>
-                <option value="sunset-orange" style={{ background: '#141418', color: '#fb923c' }}>🍊 Sunset Amber & Charcoal</option>
-                <option value="cyber-gold" style={{ background: '#121216', color: '#facc15' }}>⚡ Cyber Gold & Obsidian</option>
-                <option value="elder-high-contrast" style={{ background: '#000000', color: '#facc15' }}>👁️ Senior High-Contrast (WCAG AAA Gold)</option>
-                <option value="emerald-triranga" style={{ background: '#052219', color: '#34d399' }}>🇮🇳 Emerald Heritage (Tiranga Forest)</option>
-                <option value="sepia-warm" style={{ background: '#fbf0d9', color: '#433422' }}>📖 Warm Eye-Comfort Sepia (Kindle)</option>
-                <option value="royal-sapphire" style={{ background: '#0a0406', color: '#fb7185' }}>🌹 Royal Ruby & Crimson (Imperial Red)</option>
-              </select>
-            </div>
-
-            {/* Quick Aa Text & Typography Popover (Elderly Accessibility & Indic Matra Clearance) */}
-            <div style={{ position: 'relative' }}>
-              <button
-                type="button"
-                onClick={() => setIsTextMenuOpen(!isTextMenuOpen)}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '5px',
-                  background: isTextMenuOpen ? 'rgba(99, 102, 241, 0.35)' : 'rgba(30, 41, 59, 0.85)',
-                  border: isTextMenuOpen ? '1px solid #818cf8' : '1px solid var(--border-medium)',
-                  padding: '4px 9px',
-                  borderRadius: '6px',
-                  color: '#f8fafc',
-                  fontSize: '11.5px',
-                  fontWeight: 600,
-                  cursor: 'pointer'
-                }}
-                title="Elderly Accessibility & Indic Matra Clearance Options"
-              >
-                <Type size={13} color="#38bdf8" />
-                <span>Aa Text</span>
-                <span style={{
-                  fontSize: '10px',
-                  padding: '1px 5px',
-                  borderRadius: '4px',
-                  background: textSize === 'large' || textSize === 'jumbo' ? '#f59e0b' : 'rgba(255,255,255,0.12)',
-                  color: textSize === 'large' || textSize === 'jumbo' ? '#000' : '#cbd5e1',
-                  fontWeight: 700
-                }}>
-                  {textSize === 'normal' ? '100%' : textSize === 'medium' ? '115%' : textSize === 'large' ? '130%' : '145%'}
-                </span>
-              </button>
-
-              {isTextMenuOpen && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: '100%',
-                    right: 0,
-                    marginTop: '8px',
-                    width: '310px',
-                    background: 'var(--bg-card, #1e293b)',
-                    border: '1px solid var(--border-medium, #475569)',
-                    borderRadius: '10px',
-                    padding: '14px',
-                    boxShadow: '0 12px 32px rgba(0,0,0,0.55)',
-                    zIndex: 1000,
-                    backdropFilter: 'blur(16px)',
-                    color: 'var(--text-primary, #f8fafc)'
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-                    <div style={{ fontWeight: 700, fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <Type size={14} color="#38bdf8" />
-                      <span>Text & Indic Options</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setIsTextMenuOpen(false)}
-                      style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '2px' }}
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-
-                  {/* 1-Tap Senior Preset */}
-                  <div style={{ marginBottom: '12px' }}>
-                    <button
-                      type="button"
-                      onClick={applyElderPreset}
-                      style={{
-                        width: '100%',
-                        padding: '6px 10px',
-                        background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.25), rgba(217, 119, 6, 0.15))',
-                        border: '1px solid #f59e0b',
-                        borderRadius: '6px',
-                        color: '#fbbf24',
-                        fontWeight: 700,
-                        fontSize: '11.5px',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '6px'
-                      }}
-                    >
-                      <span>👴 1-Tap Senior Citizen Mode (130% + AAA)</span>
-                    </button>
-                  </div>
-
-                  {/* Font Size Options */}
-                  <div style={{ marginBottom: '12px' }}>
-                    <div style={{ fontSize: '11px', color: 'var(--text-secondary, #94a3b8)', marginBottom: '5px', fontWeight: 600 }}>
-                      Font Magnification:
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '4px' }}>
-                      {[
-                        { id: 'normal', label: '100%' },
-                        { id: 'medium', label: '115%' },
-                        { id: 'large', label: '130%' },
-                        { id: 'jumbo', label: '145%' }
-                      ].map((item) => (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onClick={() => applyTextSize(item.id)}
-                          style={{
-                            padding: '4px 2px',
-                            fontSize: '11px',
-                            fontWeight: textSize === item.id ? 700 : 500,
-                            borderRadius: '5px',
-                            border: textSize === item.id ? '1px solid #818cf8' : '1px solid var(--border-subtle)',
-                            background: textSize === item.id ? 'rgba(99, 102, 241, 0.3)' : 'rgba(255, 255, 255, 0.05)',
-                            color: textSize === item.id ? '#a5b4fc' : 'var(--text-primary)',
-                            cursor: 'pointer'
-                          }}
-                        >
-                          {item.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Line Spacing / Matra Clearance */}
-                  <div style={{ marginBottom: '12px' }}>
-                    <div style={{ fontSize: '11px', color: 'var(--text-secondary, #94a3b8)', marginBottom: '5px', fontWeight: 600 }}>
-                      Line Spacing (Telugu / Hindi Matra Clearance):
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '4px' }}>
-                      {[
-                        { id: 'compact', label: '1.5x Compact' },
-                        { id: 'normal', label: '1.8x Indic' },
-                        { id: 'spacious', label: '2.1x Elder' }
-                      ].map((item) => (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onClick={() => applyLineHeight(item.id)}
-                          style={{
-                            padding: '4px 2px',
-                            fontSize: '10.5px',
-                            fontWeight: lineHeight === item.id ? 700 : 500,
-                            borderRadius: '5px',
-                            border: lineHeight === item.id ? '1px solid #38bdf8' : '1px solid var(--border-subtle)',
-                            background: lineHeight === item.id ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255, 255, 255, 0.05)',
-                            color: lineHeight === item.id ? '#7dd3fc' : 'var(--text-primary)',
-                            cursor: 'pointer'
-                          }}
-                        >
-                          {item.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Indic Shield Toggle */}
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '8px 10px',
-                    background: 'rgba(255, 255, 255, 0.04)',
-                    borderRadius: '6px',
-                    marginBottom: '10px'
-                  }}>
-                    <div>
-                      <div style={{ fontSize: '11.5px', fontWeight: 600 }}>Indic Matra Shield</div>
-                      <div style={{ fontSize: '10px', color: 'var(--text-secondary, #94a3b8)' }}>Auto-spaces Telugu & Hindi</div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={toggleIndicMode}
-                      style={{
-                        padding: '3px 8px',
-                        borderRadius: '4px',
-                        border: 'none',
-                        fontSize: '10.5px',
-                        fontWeight: 700,
-                        cursor: 'pointer',
-                        background: indicMode ? '#10b981' : '#64748b',
-                        color: '#fff'
-                      }}
-                    >
-                      {indicMode ? 'ON' : 'OFF'}
-                    </button>
-                  </div>
-
-                  {/* Reset Defaults button */}
-                  <button
-                    type="button"
-                    onClick={resetTypography}
-                    style={{
-                      width: '100%',
-                      background: 'transparent',
-                      border: '1px solid var(--border-subtle)',
-                      borderRadius: '5px',
-                      color: 'var(--text-muted, #94a3b8)',
-                      padding: '4px',
-                      fontSize: '11px',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    🔄 Reset Standard Text
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Active Model Selector: Normal chat models in Type 1, Nova Sonic exclusively in Type 2 */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-              <select
-                value={voiceMode === 'type2' ? 'amazon.nova-2-5-sonic' : (selectedModel === 'amazon.nova-2-5-sonic' ? (lastNormalModel || 'Auto') : selectedModel)}
-                onChange={(e) => handleModelChange(e.target.value)}
-                style={{
-                  background: voiceMode === 'type2' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(30, 41, 59, 0.8)',
-                  border: voiceMode === 'type2' ? '1px solid #34d399' : '1px solid var(--border-medium)',
-                  borderRadius: '6px',
-                  color: voiceMode === 'type2' ? '#6ee7b7' : '#f8fafc',
-                  padding: '4px 8px',
-                  fontSize: '11.5px',
-                  outline: 'none',
-                  cursor: 'pointer'
-                }}
-                title={voiceMode === 'type2' ? "Voice-to-Voice powered exclusively by Amazon Nova 2.5 Sonic" : "Select Normal Chat Model (Type 1 Push)"}
-              >
-                {voiceMode === 'type2' ? (
-                  <option value="amazon.nova-2-5-sonic" style={{ background: '#0f172a', color: '#6ee7b7' }}>
-                    ⚡ Amazon Nova 2.5 Sonic (Voice-to-Voice Only)
-                  </option>
-                ) : (
-                  <>
-                    <option value="Auto" style={{ background: '#0f172a', color: '#f8fafc' }}>Auto (Gemma 3 12B IT - Default)</option>
-                    <option value="google.gemma-3-12b-it" style={{ background: '#0f172a', color: '#f8fafc' }}>Google Gemma 3 12B IT</option>
-                    <option value="nvidia.nemotron-super-3-120b" style={{ background: '#0f172a', color: '#f8fafc' }}>NVIDIA Nemotron 120B</option>
-                    <option value="mistral.devstral-2-123b" style={{ background: '#0f172a', color: '#f8fafc' }}>Mistral Devstral 123B</option>
-                    <option value="databricks-meta-llama-3-3-70b-instruct" style={{ background: '#0f172a', color: '#f8fafc' }}>Databricks Llama 3.3 70B</option>
-                  </>
-                )}
-              </select>
-            </div>
-
-            {/* Voice Mode Selector: Type 1 (Push-to-Talk) vs Type 2 (Voice-to-Voice) */}
+            {/* Voice Mode Selector: Type 1 (Push-to-Talk) vs Type 2 (Live Voice) */}
             <div style={{
               display: 'flex',
               background: 'rgba(30, 41, 59, 0.9)',
@@ -1601,11 +1356,11 @@ export const ChatDashboard = ({ onNavigate }) => {
                     setSelectedVoiceId('en-neural-neerja');
                     voiceAssistant.setSelectedVoice('en-neural-neerja');
                   }
-                  setVoiceStatusNotice(`🎙️ Type 1 (Push-to-Talk) Active — Normal chat model (${restored}) with Indian English voice enabled`);
-                  setTimeout(() => setVoiceStatusNotice(''), 2500);
+                  setVoiceStatusNotice(`🎙️ Type 1 (Push-to-Talk) Active`);
+                  setTimeout(() => setVoiceStatusNotice(''), 2000);
                 }}
                 style={{
-                  padding: '4px 10px',
+                  padding: '4px 9px',
                   fontSize: '11.5px',
                   fontWeight: 600,
                   borderRadius: '6px',
@@ -1615,7 +1370,7 @@ export const ChatDashboard = ({ onNavigate }) => {
                   color: voiceMode === 'type1' ? '#a5b4fc' : '#94a3b8',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '5px'
+                  gap: '4px'
                 }}
               >
                 <Mic size={13} />
@@ -1638,7 +1393,7 @@ export const ChatDashboard = ({ onNavigate }) => {
                   }
                 }}
                 style={{
-                  padding: '4px 10px',
+                  padding: '4px 9px',
                   fontSize: '11.5px',
                   fontWeight: 600,
                   borderRadius: '6px',
@@ -1648,33 +1403,12 @@ export const ChatDashboard = ({ onNavigate }) => {
                   color: voiceMode === 'type2' ? '#34d399' : '#94a3b8',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '5px'
+                  gap: '4px'
                 }}
               >
                 <Radio size={13} />
-                <span>⚡ Type 2 (Voice-to-Voice: Nova Sonic 2.5)</span>
+                <span>⚡ Type 2 (Live Voice)</span>
               </button>
-            </div>
-
-            {/* Mic Language Status Badge */}
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '5px',
-                padding: '4px 8px',
-                borderRadius: '6px',
-                background: 'rgba(15, 23, 42, 0.75)',
-                border: '1px solid var(--border-medium)',
-                fontSize: '11px',
-                color: '#cbd5e1'
-              }}
-              title={`Speech recognition language: ${targetLanguage === 'te' ? 'Telugu' : (targetLanguage === 'hi' ? 'Hindi' : 'English')}`}
-            >
-              <span style={{ fontSize: '11px' }}>🎙️</span>
-              <span style={{ fontWeight: 600, color: targetLanguage === 'te' ? '#38bdf8' : (targetLanguage === 'hi' ? '#fb923c' : '#a5b4fc') }}>
-                {targetLanguage === 'te' ? 'తెలుగు (te-IN)' : (targetLanguage === 'hi' ? 'हिन्दी (hi-IN)' : 'English (en-US)')}
-              </span>
             </div>
 
             {/* Sub-controls based on active Voice Mode */}
@@ -1736,64 +1470,6 @@ export const ChatDashboard = ({ onNavigate }) => {
               </span>
             </button>
 
-            {/* Compact Multi-Voice Selector Dropdown for Citizens and Admins */}
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              background: 'rgba(30, 41, 59, 0.85)',
-              padding: '3px 8px',
-              borderRadius: '6px',
-              border: '1px solid var(--border-medium)'
-            }}>
-              <Volume2 size={13} color="#38bdf8" />
-              <select
-                value={selectedVoiceId}
-                onChange={(e) => handleSelectVoice(e.target.value)}
-                style={{
-                  background: 'transparent',
-                  border: 'none',
-                  color: '#f8fafc',
-                  fontSize: '11.5px',
-                  outline: 'none',
-                  cursor: 'pointer',
-                  maxWidth: '170px'
-                }}
-                title="Select Assistant Voice & Gender (Male / Female)"
-              >
-                {voiceList && voiceList.length > 0 ? (
-                  voiceList.map((v) => (
-                    <option key={v.id} value={v.id} style={{ background: '#0f172a', color: '#f8fafc' }}>
-                      {v.label}
-                    </option>
-                  ))
-                ) : (
-                  <>
-                    <option value="male-default" style={{ background: '#0f172a', color: '#f8fafc' }}>👨 Male — Default Assistant</option>
-                    <option value="female-default" style={{ background: '#0f172a', color: '#f8fafc' }}>👩 Female — Assistant</option>
-                  </>
-                )}
-              </select>
-
-              <button
-                type="button"
-                onClick={handlePreviewVoice}
-                title="Preview voice pronunciation"
-                style={{
-                  background: 'rgba(99, 102, 241, 0.25)',
-                  border: '1px solid rgba(99, 102, 241, 0.45)',
-                  borderRadius: '4px',
-                  color: '#c7d2fe',
-                  fontSize: '10.5px',
-                  padding: '2px 6px',
-                  cursor: 'pointer',
-                  fontWeight: 600
-                }}
-              >
-                ▶ Test
-              </button>
-            </div>
-
             {/* Admin Dashboard Link (Only visible to admin) */}
             {isAdmin && (
               <button
@@ -1838,7 +1514,7 @@ export const ChatDashboard = ({ onNavigate }) => {
                 Ask About Any Government Scheme
               </h2>
               <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginBottom: '28px' }}>
-                Powered by Databricks Vector Search, AWS Bedrock Converse Models, and PII Guardrails.
+                Official Indian Government Welfare & Citizen Scheme Assistance
               </p>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', textAlign: 'left' }}>
@@ -1918,8 +1594,8 @@ export const ChatDashboard = ({ onNavigate }) => {
                       <div style={{ fontSize: '11px', color: '#38bdf8', fontWeight: 700, letterSpacing: '0.5px' }}>
                         🤖 GOV ASSISTANT RESPONSE
                       </div>
-                      <span className={`pill ${modelBadge.style}`} style={{ fontSize: '11px', padding: '1px 8px' }}>
-                        🧠 {modelBadge.name}
+                      <span className="pill pill-cyan" style={{ fontSize: '11px', padding: '1px 8px' }}>
+                        🛡️ Official Scheme Verification
                       </span>
                     </div>
 
@@ -2131,7 +1807,7 @@ export const ChatDashboard = ({ onNavigate }) => {
             <div className="chat-bubble-assistant" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <div className="status-dot status-dot-active mic-recording-pulse" />
               <span style={{ fontSize: '13.5px', color: '#38bdf8' }}>
-                Querying {selectedModel} with vector search & PII guardrails...
+                Searching official government scheme guidelines...
               </span>
             </div>
           )}
