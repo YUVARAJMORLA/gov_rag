@@ -260,34 +260,25 @@ exports.sendQueryStream = async (req, res) => {
     }
 
     let buffer = '';
-    pyStream.data.on('data', async (chunk) => {
-      buffer += chunk.toString('utf8');
-      const lines = buffer.split('\n\n');
-      buffer = lines.pop() || '';
+    try {
+      for await (const chunk of pyStream.data) {
+        buffer += chunk.toString('utf8');
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) continue;
-        const jsonStr = trimmed.replace(/^data:\s*/, '');
-        try {
-          const { event, data } = JSON.parse(jsonStr);
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const jsonStr = trimmed.replace(/^data:\s*/, '');
+          try {
+            const { event, data } = JSON.parse(jsonStr);
 
-          if (event === 'token') {
-            res.write(`data: ${JSON.stringify({ event: 'token', data })}\n\n`);
-          } else if (event === 'done') {
-            // When Python completes generation, save assistant message to DB
-            const finalQuestionId = data.question_id || questionId;
-            const assistantMsg = await ChatMessage.create({
-              sessionId,
-              userId,
-              questionId: finalQuestionId,
-              role: 'assistant',
-              content: data.answer || '',
-              maskedContent: data.masked_question || '',
-              modelUsed: data.model_used || model,
-              retrievedChunks: data.retrieved_chunks || [],
-              retrievedScores: data.retrieved_scores || [],
-              metrics: {
+            if (event === 'token') {
+              res.write(`data: ${JSON.stringify({ event: 'token', data })}\n\n`);
+            } else if (event === 'done') {
+              // When Python completes generation, save assistant message to DB
+              const finalQuestionId = data.question_id || questionId;
+              const assistantMetrics = {
                 latencyMs: data.latency_ms || 0,
                 inputTokens: data.input_tokens || 0,
                 outputTokens: data.output_tokens || 0,
@@ -302,76 +293,101 @@ exports.sendQueryStream = async (req, res) => {
                 safetyViolated: data.security?.safety_violated || false,
                 safetyCategories: data.security?.safety_categories || [],
                 hasMultipleThreats: data.security?.has_multiple_threats || false
-              },
-              createdAt: new Date().toISOString()
-            });
+              };
 
-            // Auto rename session if needed
-            let updatedSessionTitle = session.title;
-            if (
-              !session.title ||
-              session.title === 'New Conversation' ||
-              session.title === 'Welcome Session' ||
-              session.title.startsWith('Inquiry #')
-            ) {
-              const trimmedQuery = query.trim();
-              updatedSessionTitle = trimmedQuery.length > 36 ? trimmedQuery.substring(0, 33) + '...' : trimmedQuery;
-              await ChatSession.findByIdAndUpdate(sessionId, {
-                title: updatedSessionTitle,
-                updatedAt: new Date().toISOString()
-              });
-            } else {
-              await ChatSession.findByIdAndUpdate(sessionId, {
-                updatedAt: new Date().toISOString()
-              });
-            }
-
-            // Emit final done event to client with full assistant message
-            res.write(`data: ${JSON.stringify({
-              event: 'done',
-              data: {
+              const assistantMsg = await ChatMessage.create({
+                sessionId,
+                userId,
                 questionId: finalQuestionId,
-                sessionTitle: updatedSessionTitle,
-                userMessage: {
-                  id: String(userMsg._id || userMsg.id),
-                  questionId: finalQuestionId,
-                  role: 'user',
-                  content: userMsg.content,
-                  createdAt: userMsg.createdAt
-                },
-                assistantMessage: {
-                  id: String(assistantMsg._id || assistantMsg.id),
-                  questionId: finalQuestionId,
-                  role: 'assistant',
-                  content: assistantMsg.content,
-                  maskedContent: assistantMsg.maskedContent,
-                  modelUsed: assistantMsg.modelUsed,
-                  audioBase64: data.audio_base64 || null,
-                  retrievedChunks: assistantMsg.retrievedChunks,
-                  retrievedScores: assistantMsg.retrievedScores,
-                  metrics: assistantMsg.metrics,
-                  createdAt: assistantMsg.createdAt
-                }
+                role: 'assistant',
+                content: data.answer || '',
+                maskedContent: data.masked_question || '',
+                modelUsed: data.model_used || model,
+                retrievedChunks: data.retrieved_chunks || [],
+                retrievedScores: data.retrieved_scores || [],
+                metrics: assistantMetrics,
+                createdAt: new Date().toISOString()
+              });
+
+              // Auto rename session if needed
+              let updatedSessionTitle = session.title;
+              if (
+                !session.title ||
+                session.title === 'New Conversation' ||
+                session.title === 'Welcome Session' ||
+                session.title.startsWith('Inquiry #')
+              ) {
+                const trimmedQuery = query.trim();
+                updatedSessionTitle = trimmedQuery.length > 36 ? trimmedQuery.substring(0, 33) + '...' : trimmedQuery;
+                await ChatSession.findByIdAndUpdate(sessionId, {
+                  title: updatedSessionTitle,
+                  updatedAt: new Date().toISOString()
+                });
+              } else {
+                await ChatSession.findByIdAndUpdate(sessionId, {
+                  updatedAt: new Date().toISOString()
+                });
               }
-            })}\n\n`);
-          } else if (event === 'error') {
-            res.write(`data: ${JSON.stringify({ event: 'error', data })}\n\n`);
+
+              // Emit final done event to client with full assistant message and explicit metrics
+              res.write(`data: ${JSON.stringify({
+                event: 'done',
+                data: {
+                  questionId: finalQuestionId,
+                  sessionTitle: updatedSessionTitle,
+                  userMessage: {
+                    id: String(userMsg._id || userMsg.id),
+                    questionId: finalQuestionId,
+                    role: 'user',
+                    content: userMsg.content,
+                    createdAt: userMsg.createdAt
+                  },
+                  assistantMessage: {
+                    id: String(assistantMsg._id || assistantMsg.id),
+                    questionId: finalQuestionId,
+                    role: 'assistant',
+                    content: assistantMsg.content,
+                    maskedContent: assistantMsg.maskedContent,
+                    modelUsed: assistantMsg.modelUsed,
+                    audioBase64: data.audio_base64 || null,
+                    retrievedChunks: data.retrieved_chunks || assistantMsg.retrievedChunks || [],
+                    retrievedScores: data.retrieved_scores || assistantMsg.retrievedScores || [],
+                    metrics: assistantMetrics,
+                    createdAt: assistantMsg.createdAt
+                  }
+                }
+              })}\n\n`);
+            } else if (event === 'error') {
+              res.write(`data: ${JSON.stringify({ event: 'error', data })}\n\n`);
+            }
+          } catch (jsonErr) {
+            console.warn('[SSE CHUNK PARSE NOTICE]', jsonErr.message);
           }
-        } catch (jsonErr) {
-          console.warn('[SSE CHUNK PARSE NOTICE]', jsonErr.message);
         }
       }
-    });
 
-    pyStream.data.on('end', () => {
-      res.end();
-    });
-
-    pyStream.data.on('error', (err) => {
-      console.warn('[PYTHON STREAM ERROR]', err.message);
-      res.write(`data: ${JSON.stringify({ event: 'error', data: { error: err.message } })}\n\n`);
-      res.end();
-    });
+      // Process any trailing data remaining in buffer
+      if (buffer.trim()) {
+        const trimmed = buffer.trim();
+        if (trimmed.startsWith('data:')) {
+          try {
+            const { event, data } = JSON.parse(trimmed.replace(/^data:\s*/, ''));
+            if (event === 'token') {
+              res.write(`data: ${JSON.stringify({ event: 'token', data })}\n\n`);
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (streamIterErr) {
+      console.warn('[PYTHON STREAM ITER NOTICE]', streamIterErr.message);
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ event: 'error', data: { error: streamIterErr.message } })}\n\n`);
+      }
+    } finally {
+      if (!res.writableEnded) {
+        res.end();
+      }
+    }
 
     req.on('close', () => {
       try {
@@ -387,7 +403,9 @@ exports.sendQueryStream = async (req, res) => {
         error: 'An internal error occurred while streaming response.'
       });
     }
-    res.end();
+    if (!res.writableEnded) {
+      res.end();
+    }
   }
 };
 

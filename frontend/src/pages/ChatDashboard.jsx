@@ -10,6 +10,179 @@ import {
   PanelLeft, PanelLeftClose
 } from 'lucide-react';
 
+// Progressive Loading Indicator while SSE stream connects and generates
+const StreamingLoadingStage = () => {
+  const [stageIndex, setStageIndex] = useState(0);
+
+  useEffect(() => {
+    const t1 = setTimeout(() => setStageIndex(1), 1600);
+    const t2 = setTimeout(() => setStageIndex(2), 3600);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, []);
+
+  const stages = [
+    {
+      icon: '🔍',
+      label: 'Searching Official Catalog',
+      desc: 'Querying Databricks vector index & government scheme database...'
+    },
+    {
+      icon: '📚',
+      label: 'Gathering Verified Guidelines',
+      desc: 'Retrieving official eligibility criteria, benefits & required documents...'
+    },
+    {
+      icon: '✨',
+      label: 'Synthesizing Response',
+      desc: 'Applying safety guardrails and preparing verified citizen guidance...'
+    }
+  ];
+
+  const currentStage = stages[stageIndex];
+
+  return (
+    <div className="streaming-stage-card">
+      <div className="streaming-stage-spinner"></div>
+      <div className="streaming-stage-info">
+        <div className="streaming-stage-title">
+          <span style={{ fontSize: '15px' }}>{currentStage.icon}</span>
+          <span style={{ fontWeight: 600, color: '#38bdf8' }}>{currentStage.label}</span>
+          <span className="streaming-stage-dots">
+            <span>.</span><span>.</span><span>.</span>
+          </span>
+        </div>
+        <div className="streaming-stage-desc" style={{ fontSize: '12px', color: '#94a3b8' }}>
+          {currentStage.desc}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const getDetailIcon = (label = '') => {
+  const l = label.toLowerCase();
+  if (l.includes('benefit') || l.includes('financial') || l.includes('రాయితీ') || l.includes('సహాయం') || l.includes('లాభ') || l.includes('लाभ') || l.includes('वित्तीय')) {
+    return { icon: '💰', title: 'Core Benefit' };
+  }
+  if (l.includes('eligib') || l.includes('criteri') || l.includes('అర్హత') || l.includes('patrata') || l.includes('पात्रता')) {
+    return { icon: '🎯', title: 'Eligibility' };
+  }
+  if (l.includes('document') || l.includes('require') || l.includes('పత్ర') || l.includes('dastavez') || l.includes('दस्तावेज') || l.includes('कागजात')) {
+    return { icon: '📄', title: 'Required Documents' };
+  }
+  if (l.includes('apply') || l.includes('process') || l.includes('విధానం') || l.includes('దరఖాస్తు') || l.includes('आवेदन') || l.includes('प्रक्रिया')) {
+    return { icon: '🚀', title: 'How to Apply' };
+  }
+  if (l.includes('pillar') || l.includes('component') || l.includes('భాగం') || l.includes('ఘటకం') || l.includes('स्तंभ')) {
+    return { icon: '🏛️', title: 'Scheme Pillar' };
+  }
+  return { icon: '📋', title: 'Key Details' };
+};
+
+const FormattedAssistantResponse = ({ content, isStreaming }) => {
+  if (isStreaming && (!content || !content.trim())) {
+    return <StreamingLoadingStage />;
+  }
+
+  if (!content) return null;
+
+  const rawLines = content.split('\n');
+  const elements = [];
+  let blockIdx = 0;
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const rawLine = rawLines[i];
+    const trimmed = rawLine.trim();
+
+    if (!trimmed) {
+      continue;
+    }
+
+    // 1. Numbered Item: e.g. "1. **Title:** Desc" or "1. Title: Desc"
+    const numMatch = trimmed.match(/^(\d+)[\.\)]\s*\*{0,2}(.*?)\*{0,2}:\s*(.*)$/);
+    if (numMatch) {
+      const num = numMatch[1];
+      const title = numMatch[2].replace(/\*/g, '').trim();
+      const desc = numMatch[3].replace(/\*/g, '').trim();
+      elements.push(
+        <div key={blockIdx++} className="scheme-numbered-item">
+          <div className="scheme-num-badge">{num}</div>
+          <div className="scheme-num-body">
+            {title && <span className="scheme-num-title">{title}: </span>}
+            <span className="scheme-num-desc">{desc}</span>
+          </div>
+        </div>
+      );
+      continue;
+    }
+
+    // 2. Structured Detail Row: e.g. "* **Core Benefit & Financial Figures:** ₹6,000..." or "- **Eligibility:** ..." or "**How to Apply:** ..."
+    const bulletDetailMatch = trimmed.match(/^[\*\-\•]?\s*\*{0,2}([^:\*]+(?:\([^)]+\))?)\*{0,2}:\s*(.*)$/);
+    if (bulletDetailMatch && bulletDetailMatch[1].length < 80) {
+      const cleanLabel = bulletDetailMatch[1].replace(/\*/g, '').trim();
+      const cleanVal = bulletDetailMatch[2].replace(/\*/g, '').trim();
+      const meta = getDetailIcon(cleanLabel);
+
+      elements.push(
+        <div key={blockIdx++} className="scheme-detail-row">
+          <div className="scheme-detail-header">
+            <span className="scheme-detail-icon">{meta.icon}</span>
+            <span className="scheme-detail-label">{cleanLabel}</span>
+          </div>
+          {cleanVal && <div className="scheme-detail-value">{cleanVal}</div>}
+        </div>
+      );
+      continue;
+    }
+
+    // 3. Scheme Title or Category Header: e.g. "**Pradhan Mantri Kisan Samman Nidhi (PM-KISAN)**" or "### Agriculture & Farmers"
+    const headerMatch = trimmed.match(/^(\*{2,3}|#{1,4})\s*(.*?)\s*\1?$/);
+    if (headerMatch && headerMatch[2].length < 120 && !headerMatch[2].includes('.')) {
+      const cleanHdr = headerMatch[2].replace(/\*/g, '').trim();
+      elements.push(
+        <div key={blockIdx++} className="scheme-card-header">
+          <span className="scheme-header-emblem">🏛️</span>
+          <span className="scheme-header-text">{cleanHdr}</span>
+        </div>
+      );
+      continue;
+    }
+
+    // 4. Bullet point without colon: e.g. "* Mandatory e-KYC is required."
+    const simpleBulletMatch = trimmed.match(/^[\*\-\•]\s*(.*)$/);
+    if (simpleBulletMatch) {
+      const cleanBullet = simpleBulletMatch[1].replace(/\*/g, '').trim();
+      elements.push(
+        <div key={blockIdx++} className="scheme-bullet-point">
+          <span className="scheme-bullet-dot">›</span>
+          <span className="scheme-bullet-text">{cleanBullet}</span>
+        </div>
+      );
+      continue;
+    }
+
+    // 5. Standard paragraph / plain text (strip all remaining asterisks)
+    const cleanParagraph = trimmed.replace(/\*\*/g, '').replace(/\*/g, '');
+    elements.push(
+      <p key={blockIdx++} className="scheme-paragraph">
+        {cleanParagraph}
+      </p>
+    );
+  }
+
+  return (
+    <div className="formatted-assistant-response">
+      {elements}
+      {isStreaming && (
+        <span className="streaming-cursor-pulse">▊</span>
+      )}
+    </div>
+  );
+};
+
 
 export const ChatDashboard = ({ onNavigate }) => {
   const { user, isAdmin, logout } = useAuth();
@@ -429,7 +602,7 @@ export const ChatDashboard = ({ onNavigate }) => {
     let effectiveLanguage = targetLanguage;
     if (
       /[\u0C00-\u0C7F]/.test(text) ||
-      /\b(cheyali|cheyandi|arhatalu|pathakam|padhakam|dabbu|dabbulu|kavali|darakhastu|ento|telupandi|raithu|rythu)\b/i.test(text)
+      /\b(cheyali|cheyandi|cheyavachu|arhatalu|aratha|pathakam|padhakam|pathakalu|padhakalu|dabbu|dabbulu|kavali|kaavaali|darakhastu|darkhastu|ento|enti|telupandi|cheppandi|raithu|rythu|labhalu|labham|sahayam|evvaru|evariki)\b/i.test(text)
     ) {
       effectiveLanguage = 'te';
       if (targetLanguage !== 'te') {
@@ -438,7 +611,7 @@ export const ChatDashboard = ({ onNavigate }) => {
       }
     } else if (
       /[\u0900-\u097F]/.test(text) ||
-      /\b(kaise|karein|karna|patrata|kitna|kitne|paise|rupya|bataiye|chahiye|dastavez|kagaz|kisko|milega)\b/i.test(text)
+      /\b(kaise|karein|karna|kare|karega|karegi|patrata|paatr|kitna|kitne|kitni|paise|rupya|rupaye|batao|bataiye|bataye|bata do|chahiye|dastavez|kagaz|kisko|kise|milega|milegi|milenge|yojna|yojana|yojanaen|aavedan)\b/i.test(text)
     ) {
       effectiveLanguage = 'hi';
       if (targetLanguage !== 'hi') {
@@ -451,7 +624,7 @@ export const ChatDashboard = ({ onNavigate }) => {
     const modelToUse = voiceMode === 'type2'
       ? 'amazon.nova-2-5-sonic'
       : (selectedModel === 'amazon.nova-2-5-sonic' ? (lastNormalModel || 'Auto') : selectedModel);
-    const isVoiceTurn = Boolean(isFromVoice || voiceMode === 'type2');
+    const isVoiceTurn = Boolean(isFromVoice || voiceMode === 'type2' || autoSpeakAnswers);
 
     try {
       await chatAPI.sendQueryStream(
@@ -524,7 +697,7 @@ export const ChatDashboard = ({ onNavigate }) => {
                 audioBase64: assistantMessage?.audioBase64,
                 isNovaSonic: isNova,
                 onStart: () => {
-                  setCurrentlySpeakingId(assistantMessage.id);
+                  setCurrentlySpeakingId(assistantMessage?.id || streamingAssistantId);
                   setVoiceStatusNotice(effectiveLanguage === 'hi' ? '🔊 सहायक उत्तर बोल रहा है...' : (effectiveLanguage === 'te' ? '🔊 సహాయకుడు సమాధానం చెబుతున్నాడు...' : '🔊 Amazon Nova 2.5 Sonic speaking response aloud...'));
                 },
                 onEnd: () => {
@@ -544,7 +717,7 @@ export const ChatDashboard = ({ onNavigate }) => {
               });
             } else if ((isFromVoice || autoSpeakAnswers) && finalContent) {
               // Type 1 Push-to-Talk OR Voice Out: speak answer aloud in synchronized, matched language
-              playVoiceResponse(assistantMessage.id, finalContent, assistantMessage?.audioBase64, assistantMessage?.modelUsed);
+              playVoiceResponse(assistantMessage?.id || streamingAssistantId, finalContent, assistantMessage?.audioBase64, assistantMessage?.modelUsed);
             }
           }
         },
@@ -815,15 +988,16 @@ export const ChatDashboard = ({ onNavigate }) => {
 
   // Play voice response (Text-to-Speech)
   const playVoiceResponse = (msgId, text, audioBase64 = null, modelUsed = '') => {
-    if (currentlySpeakingId === msgId) {
+    const activeMsgId = msgId || 'active-speech';
+    if (currentlySpeakingId === activeMsgId) {
       voiceAssistant.stopSpeaking();
       setCurrentlySpeakingId(null);
       if (!handsFreeActiveRef.current) setVoiceStatusNotice('');
     } else {
       const isNova = selectedModel === 'amazon.nova-2-5-sonic' || (modelUsed || '').toLowerCase().includes('nova') || voiceMode === 'type2';
       let langToUse = targetLanguage;
-      if (/[\u0C00-\u0C7F]/.test(text)) langToUse = 'te';
-      else if (/[\u0900-\u097F]/.test(text)) langToUse = 'hi';
+      if (/[\u0C00-\u0C7F]/.test(text) || /\b(cheyali|cheyandi|arhatalu|pathakam|dabbu|dabbulu|kavali|darakhastu)\b/i.test(text)) langToUse = 'te';
+      else if (/[\u0900-\u097F]/.test(text) || /\b(kaise|karein|karna|patrata|paise|rupya|chahiye|dastavez|bataiye|yojana)\b/i.test(text)) langToUse = 'hi';
 
       const voiceToUse = (voiceMode === 'type2' || selectedModel === 'amazon.nova-2-5-sonic')
         ? ((langToUse === 'en') ? 'nova-sonic-voice' : selectedVoiceId)
@@ -837,7 +1011,7 @@ export const ChatDashboard = ({ onNavigate }) => {
         audioBase64,
         isNovaSonic: isNova,
         onStart: () => {
-          setCurrentlySpeakingId(msgId);
+          setCurrentlySpeakingId(activeMsgId);
           setVoiceStatusNotice(langToUse === 'hi' ? '🔊 सहायक बोल रहा है...' : (langToUse === 'te' ? '🔊 సహాయకుడు సమాధానం చెబుతున్నాడు...' : (isNova ? '🔊 Amazon Nova 2.5 Sonic speaking aloud...' : '🔊 Assistant speaking response aloud...')));
         },
         onEnd: () => {
@@ -1466,7 +1640,13 @@ export const ChatDashboard = ({ onNavigate }) => {
             {/* Voice Out / Read Aloud Toggle */}
             <button
               type="button"
-              onClick={() => setAutoSpeakAnswers(!autoSpeakAnswers)}
+              onClick={() => {
+                const nextVal = !autoSpeakAnswers;
+                setAutoSpeakAnswers(nextVal);
+                if (nextVal) {
+                  voiceAssistant.playReadyChime();
+                }
+              }}
               title={autoSpeakAnswers ? 'Voice output enabled: answers are read aloud' : 'Voice output disabled: answers remain text-only'}
               className="btn btn-secondary"
               style={{
@@ -1655,14 +1835,13 @@ export const ChatDashboard = ({ onNavigate }) => {
                           color: 'var(--text-primary)',
                           fontWeight: 400,
                           letterSpacing: isAsstIndic ? 'calc(var(--letter-spacing-base, 0px) + 0.35px)' : 'var(--letter-spacing-base, 0px)',
-                          whiteSpace: 'pre-wrap',
                           marginBottom: '12px'
                         }}
                       >
-                        {msg.content || (msg.isStreaming ? '⚡ Generating answer...' : '')}
-                        {msg.isStreaming && (
-                          <span style={{ display: 'inline-block', width: '7px', height: '14px', marginLeft: '4px', background: '#38bdf8', verticalAlign: 'middle', borderRadius: '1px', opacity: 0.85 }}></span>
-                        )}
+                        <FormattedAssistantResponse
+                          content={msg.content}
+                          isStreaming={msg.isStreaming}
+                        />
                       </div>
                     );
                   })()}

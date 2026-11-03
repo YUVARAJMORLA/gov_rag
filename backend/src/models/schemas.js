@@ -38,8 +38,15 @@ const ChatMessageSchema = new mongoose.Schema({
     outputCost: { type: Number, default: 0 },
     llmAbleToAnswer: { type: Boolean, default: true },
     piiMasked: { type: Boolean, default: false },
-    injectionDetected: { type: Boolean, default: false }
+    piiCategories: { type: [String], default: [] },
+    injectionDetected: { type: Boolean, default: false },
+    injectionCategory: { type: String, default: null },
+    injectionCategories: { type: [String], default: [] },
+    safetyViolated: { type: Boolean, default: false },
+    safetyCategories: { type: [String], default: [] },
+    hasMultipleThreats: { type: Boolean, default: false }
   },
+  audioBase64: { type: String, default: null },
   feedbackRating: { type: Number, default: null },
   createdAt: { type: Date, default: Date.now }
 });

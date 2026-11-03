@@ -722,6 +722,53 @@ def is_overview_or_catalog_query(q: str) -> bool:
     return any(p in lower for p in patterns)
 
 
+def detect_user_language(query: str, target_language: str = "en") -> str:
+    """
+    Intelligently detects whether query is in Telugu, Hindi, or English.
+    Handles native Indic scripts as well as Romanized/transliterated citizen queries.
+    """
+    if not query:
+        return target_language or "en"
+
+    # 1. Native Indic Scripts
+    if bool(re.search(r'[\u0C00-\u0C7F]', query)):
+        return "te"
+    if bool(re.search(r'[\u0900-\u097F]', query)):
+        return "hi"
+
+    q_lower = query.lower()
+
+    # 2. Transliterated / Romanized Telugu keywords
+    telugu_patterns = [
+        r'\b(arhatalu|aratha|pathakam|padhakam|pathakalu|padhakalu)\b',
+        r'\b(darakhastu|darkhastu|cheyali|cheyandi|cheyavachu|cheyadam)\b',
+        r'\b(kavali|kaavaali|ento|enti|telupandi|cheppandi|vivaralu)\b',
+        r'\b(dabbulu|dabbu|raithu|rythu|labhalu|labham|sahayam)\b',
+        r'\b(evvaru|evariki|ela|eppudu|deniki|enduku)\b'
+    ]
+    for p in telugu_patterns:
+        if re.search(p, q_lower):
+            return "te"
+
+    # 3. Transliterated / Romanized Hindi keywords
+    hindi_patterns = [
+        r'\b(kaise|karna|karein|kare|karega|karegi|kariye)\b',
+        r'\b(patrata|paatr|yojna|yojana|yojanaen|labh|suvidha)\b',
+        r'\b(chahiye|batao|bataiye|bataye|bata do|dikhaye)\b',
+        r'\b(dastavez|kagaz|kisko|kise|milega|milegi|milenge)\b',
+        r'\b(kitna|kitne|kitni|paise|rupya|rupaye)\b',
+        r'\b(aavedan|shuru|khatam|sarkari)\b'
+    ]
+    for p in hindi_patterns:
+        if re.search(p, q_lower):
+            return "hi"
+
+    if target_language in ("te", "hi"):
+        return target_language
+
+    return "en"
+
+
 def invoke_bedrock_converse(
     model_id: str,
     prompt: str,
@@ -761,6 +808,7 @@ def invoke_bedrock_converse(
         "      - IF THE CITIZEN ASKS A GENERAL OVERVIEW ABOUT A SINGLE SCHEME:\n"
         "        Provide a concise overview with Scheme Name, Core Financial Figures & Benefits, Eligibility, and How to Apply.\n"
         "      - NEVER append a full catalog list of all schemes when the citizen asked a question about a specific scheme!\n"
+        "      - CLEAN FORMATTING WITHOUT RAW ASTERISKS: DO NOT output raw markdown asterisks (* or **). Use clean plain headings, structured bullet points, and numbered lists without asterisks.\n"
         "      - Ensure tone is helpful, authoritative, respectful, and citizen-friendly."
     )
 
@@ -906,6 +954,7 @@ def invoke_bedrock_converse_stream(
         "      - IF THE CITIZEN ASKS A GENERAL OVERVIEW ABOUT A SINGLE SCHEME:\n"
         "        Provide a concise overview with Scheme Name, Core Financial Figures & Benefits, Eligibility, and How to Apply.\n"
         "      - NEVER append a full catalog list of all schemes when the citizen asked a question about a specific scheme!\n"
+        "      - CLEAN FORMATTING WITHOUT RAW ASTERISKS: DO NOT output raw markdown asterisks (* or **). Use clean plain headings, structured bullet points, and numbered lists without asterisks.\n"
         "      - Ensure tone is helpful, authoritative, respectful, and citizen-friendly."
     )
 
@@ -1311,12 +1360,8 @@ def execute_rag_pipeline(
     qid = str(uuid.uuid4())
     t0 = time.time()
 
-    # Automatically detect language from user query if target_language is default "en"
-    detected_lang = target_language
-    if bool(re.search(r'[\u0C00-\u0C7F]', user_query)):
-        detected_lang = "te"
-    elif bool(re.search(r'[\u0900-\u097F]', user_query)):
-        detected_lang = "hi"
+    # Automatically detect language from user query (script or Romanized)
+    detected_lang = detect_user_language(user_query, target_language)
 
     # 0a. Conversational Greeting Check (Only when user explicitly greets)
     clean_lower = re.sub(r'[^a-zA-Z\s]', '', user_query.strip().lower()).strip()
@@ -1584,12 +1629,8 @@ def execute_rag_pipeline_stream(
     qid = str(uuid.uuid4())
     t0 = time.time()
 
-    # Automatically detect language from user query if target_language is default "en"
-    detected_lang = target_language
-    if bool(re.search(r'[\u0C00-\u0C7F]', user_query)):
-        detected_lang = "te"
-    elif bool(re.search(r'[\u0900-\u097F]', user_query)):
-        detected_lang = "hi"
+    # Automatically detect language from user query (script or Romanized)
+    detected_lang = detect_user_language(user_query, target_language)
 
     # 0a. Conversational Greeting Check
     clean_lower = re.sub(r'[^a-zA-Z\s]', '', user_query.strip().lower()).strip()
