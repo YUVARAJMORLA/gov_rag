@@ -20,6 +20,9 @@ import sys
 import time
 import json
 import uuid
+import threading
+import concurrent.futures
+from collections import OrderedDict
 from typing import Dict, Any, List, Tuple, Optional
 import boto3
 from botocore.config import Config
@@ -188,19 +191,76 @@ def get_aws_credentials_kwargs() -> Dict[str, Any]:
     return kwargs
 
 
+# --- Connection Pooling & Caching Infrastructure ---
+_CACHE_LOCK = threading.Lock()
+_EMBEDDING_CACHE: OrderedDict = OrderedDict()
+MAX_EMBEDDING_CACHE_SIZE = 1000
+
+_VECTOR_SEARCH_CACHE: OrderedDict = OrderedDict()
+MAX_VECTOR_SEARCH_CACHE_SIZE = 500
+
+_TRANSLATION_CACHE: OrderedDict = OrderedDict()
+MAX_TRANSLATION_CACHE_SIZE = 500
+
+_bedrock_client = None
+_bedrock_lock = threading.Lock()
+
+_polly_client = None
+_polly_lock = threading.Lock()
+
+_vsc_client = None
+_vs_index = None
+_vs_lock = threading.Lock()
+
+# Background Databricks Statement Execution Logging Thread Pool
+_db_log_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=3,
+    thread_name_prefix="databricks_logger"
+)
+
+
+def submit_async_db_logging(tasks: List[Tuple[Any, Tuple]]):
+    """
+    Submits Databricks governance logging statements to a background thread pool.
+    Prevents blocking user chat responses by 2-5 seconds on SQL Warehouse Statement Execution.
+    """
+    def _execute():
+        for fn, args in tasks:
+            try:
+                fn(*args)
+            except Exception as e:
+                print(f"[ASYNC DB LOGGING NOTICE] {getattr(fn, '__name__', 'log_func')} failed: {e}")
+    try:
+        _db_log_executor.submit(_execute)
+    except Exception as e:
+        print(f"[ASYNC DB LOGGING SUBMIT ERROR] {e}")
+
+
 def get_bedrock_client():
-    """Initializes and returns the AWS Bedrock Runtime client."""
-    kwargs = get_aws_credentials_kwargs()
-    kwargs["service_name"] = "bedrock-runtime"
-    kwargs["config"] = Config(retries={"max_attempts": 2, "mode": "standard"})
-    return boto3.client(**kwargs)
+    """Initializes and returns a pooled, cached AWS Bedrock Runtime client."""
+    global _bedrock_client
+    with _bedrock_lock:
+        if _bedrock_client is None:
+            kwargs = get_aws_credentials_kwargs()
+            kwargs["service_name"] = "bedrock-runtime"
+            kwargs["config"] = Config(
+                retries={"max_attempts": 2, "mode": "standard"},
+                max_pool_connections=25
+            )
+            _bedrock_client = boto3.client(**kwargs)
+        return _bedrock_client
 
 
 def get_polly_client():
-    """Initializes and returns AWS Polly client for text-to-speech voice generation."""
-    kwargs = get_aws_credentials_kwargs()
-    kwargs["service_name"] = "polly"
-    return boto3.client(**kwargs)
+    """Initializes and returns a cached AWS Polly client."""
+    global _polly_client
+    with _polly_lock:
+        if _polly_client is None:
+            kwargs = get_aws_credentials_kwargs()
+            kwargs["service_name"] = "polly"
+            kwargs["config"] = Config(max_pool_connections=15)
+            _polly_client = boto3.client(**kwargs)
+        return _polly_client
 
 
 def generate_speech_audio(
@@ -242,13 +302,20 @@ def generate_speech_audio(
 
 
 def get_databricks_embedding(query_text: str) -> List[float]:
-    """Computes embedding vector via WorkspaceClient serving_endpoints."""
+    """Computes embedding vector via WorkspaceClient serving_endpoints with LRU caching."""
+    clean_key = query_text.strip().lower()
+    with _CACHE_LOCK:
+        if clean_key in _EMBEDDING_CACHE:
+            _EMBEDDING_CACHE.move_to_end(clean_key)
+            return list(_EMBEDDING_CACHE[clean_key])
+
+    embedding = None
     try:
         emb = w.serving_endpoints.query(name=EMBEDDING_MODEL, input=query_text)
         if hasattr(emb, 'data') and emb.data:
-            return emb.data[0].embedding
+            embedding = emb.data[0].embedding
         elif isinstance(emb, dict) and "data" in emb and emb["data"]:
-            return emb["data"][0]["embedding"]
+            embedding = emb["data"][0]["embedding"]
     except Exception as e:
         # Fallback to direct HTTP endpoint if SDK wrapper encounters format variation
         host = os.getenv("DATABRICKS_SERVER_HOSTNAME", "").strip()
@@ -257,29 +324,64 @@ def get_databricks_embedding(query_text: str) -> List[float]:
         resp = requests.post(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                              json={"input": [query_text]}, timeout=20)
         resp.raise_for_status()
-        return resp.json()["data"][0]["embedding"]
+        embedding = resp.json()["data"][0]["embedding"]
+
+    if embedding:
+        with _CACHE_LOCK:
+            _EMBEDDING_CACHE[clean_key] = embedding
+            if len(_EMBEDDING_CACHE) > MAX_EMBEDDING_CACHE_SIZE:
+                _EMBEDDING_CACHE.popitem(last=False)
+        return embedding
+
     raise ValueError(f"Could not compute embedding from {EMBEDDING_MODEL}")
+
+
+def _get_vector_index():
+    """Returns cached Databricks Vector Search index handle to avoid redundant metadata queries."""
+    global _vsc_client, _vs_index
+    with _vs_lock:
+        if _vs_index is not None:
+            return _vs_index
+        try:
+            endpoint_name = os.getenv("DATABRICKS_VECTOR_SEARCH_ENDPOINT", "rag-gov-endpoint").strip()
+            host = os.getenv("DATABRICKS_SERVER_HOSTNAME", "").strip()
+            token = os.getenv("DATABRICKS_TOKEN", "").strip()
+            from databricks.vector_search.client import VectorSearchClient
+            _vsc_client = VectorSearchClient(workspace_url=f"https://{host}", personal_access_token=token, disable_notice=True)
+            _vs_index = _vsc_client.get_index(endpoint_name=endpoint_name, index_name=VS_INDEX_NAME)
+            return _vs_index
+        except Exception as e:
+            print(f"[VECTOR SEARCH CLIENT INIT NOTICE] {e}")
+            return None
 
 
 def query_databricks_vector_search(query_text: str, num_results: int = 5) -> Tuple[List[str], List[float], List[str]]:
     """
-    Queries Databricks Vector Search index using computed query_vector.
+    Queries Databricks Vector Search index using computed query_vector with caching & connection reuse.
     Matches reference app.py columns: ['chunk_id', 'file_name', 'chunk_text', 'version'].
     """
+    cache_key = f"{query_text.strip().lower()}__k{num_results}"
+    with _CACHE_LOCK:
+        if cache_key in _VECTOR_SEARCH_CACHE:
+            _VECTOR_SEARCH_CACHE.move_to_end(cache_key)
+            cids, scores, texts = _VECTOR_SEARCH_CACHE[cache_key]
+            return list(cids), list(scores), list(texts)
+
     cids, scores, texts = [], [], []
 
     try:
-        # 1. Compute embedding vector
+        # 1. Compute embedding vector (cached)
         qv = get_databricks_embedding(query_text)
 
-        # 2. Query index
-        endpoint_name = os.getenv("DATABRICKS_VECTOR_SEARCH_ENDPOINT", "rag-gov-endpoint").strip()
-        host = os.getenv("DATABRICKS_SERVER_HOSTNAME", "").strip()
-        token = os.getenv("DATABRICKS_TOKEN", "").strip()
-
-        from databricks.vector_search.client import VectorSearchClient
-        vsc = VectorSearchClient(workspace_url=f"https://{host}", personal_access_token=token, disable_notice=True)
-        idx = vsc.get_index(endpoint_name=endpoint_name, index_name=VS_INDEX_NAME)
+        # 2. Query index via cached index handle
+        idx = _get_vector_index()
+        if idx is None:
+            endpoint_name = os.getenv("DATABRICKS_VECTOR_SEARCH_ENDPOINT", "rag-gov-endpoint").strip()
+            host = os.getenv("DATABRICKS_SERVER_HOSTNAME", "").strip()
+            token = os.getenv("DATABRICKS_TOKEN", "").strip()
+            from databricks.vector_search.client import VectorSearchClient
+            vsc = VectorSearchClient(workspace_url=f"https://{host}", personal_access_token=token, disable_notice=True)
+            idx = vsc.get_index(endpoint_name=endpoint_name, index_name=VS_INDEX_NAME)
 
         # Query index using Databricks HYBRID search (dense semantic embeddings + BM25 keyword matching)
         try:
@@ -310,15 +412,13 @@ def query_databricks_vector_search(query_text: str, num_results: int = 5) -> Tup
             scores.append(score)
 
         # Document Relevance Scoring / Threshold Filtering:
-        # Databricks Vector Search HYBRID index uses Reciprocal Rank Fusion (RRF) scores (typically 0.001 - 0.05).
-        # Direct cosine indexes use 0.0 - 1.0. Detect score scale to prevent dropping high-ranking chunks.
+        # Filter out chunks below the threshold (default: 0.60) to eliminate irrelevant noise
         is_rrf_scoring = any(0.0 < sc < 0.10 for sc in scores) if scores else False
         env_threshold = os.getenv("SIMILARITY_THRESHOLD")
 
         if env_threshold is not None:
             similarity_threshold = float(env_threshold)
         elif is_rrf_scoring:
-            # For RRF hybrid scores, keep top returned results unless score is practically zero
             similarity_threshold = 0.0005
         else:
             similarity_threshold = 0.45
@@ -335,7 +435,6 @@ def query_databricks_vector_search(query_text: str, num_results: int = 5) -> Tup
                 except Exception:
                     pass
 
-        # If strict filtering dropped all chunks but search had returned valid documents, preserve the top results
         if not filtered_cids and cids and not env_threshold:
             print("[THRESHOLD NOTICE] Threshold filtered all chunks; falling back to top returned vector search chunks.")
             filtered_cids, filtered_scores, filtered_texts = cids, scores, texts
@@ -344,8 +443,18 @@ def query_databricks_vector_search(query_text: str, num_results: int = 5) -> Tup
         scores = filtered_scores
         texts = filtered_texts
 
+        if cids:
+            with _CACHE_LOCK:
+                _VECTOR_SEARCH_CACHE[cache_key] = (cids, scores, texts)
+                if len(_VECTOR_SEARCH_CACHE) > MAX_VECTOR_SEARCH_CACHE_SIZE:
+                    _VECTOR_SEARCH_CACHE.popitem(last=False)
+
     except Exception as e:
         print(f"[VECTOR SEARCH NOTICE] Vector search failed: {e}")
+        # Reset cached index in case connection / token expired
+        global _vs_index
+        with _vs_lock:
+            _vs_index = None
         cids = ["fallback_chunk"]
         scores = [0.0]
         texts = [f"Retrieval notice: {str(e)}"]
@@ -753,6 +862,153 @@ def invoke_bedrock_converse(
     return answer, input_tokens, output_tokens, audio_out_bytes
 
 
+def invoke_bedrock_converse_stream(
+    model_id: str,
+    prompt: str,
+    context_texts: List[str],
+    audio_bytes: Optional[bytes] = None,
+    audio_format: str = "wav",
+    target_language: str = "en",
+    is_voice: bool = False
+):
+    """
+    Streams AWS Bedrock Converse response tokens in real-time.
+    Yields ("token", delta_str) for each generated token block,
+    and finally yields ("meta", (full_text, input_tokens, output_tokens, audio_out_bytes)).
+    """
+    client = get_bedrock_client()
+    context_str = "\n\n".join(context_texts)
+    is_overview = is_overview_or_catalog_query(prompt)
+
+    system_instruction = (
+        "You are an enterprise AI assistant strictly dedicated to Indian government schemes and citizen initiatives.\n"
+        "CRITICAL CONSTRAINTS & OUTPUT GUIDELINES:\n"
+        "1. STRICT CONTEXT ONLY: You must answer questions using facts provided in the context below. "
+        "DO NOT use your pre-trained general knowledge or external world trivia.\n"
+        "2. DIRECT, CLEAN ANSWERS: DO NOT prepend 'Hello', 'Namaste', 'Hi', or conversational pleasantries when answering scheme questions. Answer directly, neatly, and concisely.\n"
+        "3. GREETINGS: Only if the user's prompt is purely a greeting (e.g. 'Hi', 'Hello', 'Namaste'), respond warmly in 1-2 friendly sentences.\n"
+        "4. REFUSAL FOR OUT-OF-CONTEXT TOPICS: If the question cannot be answered from the provided documents (e.g. world trivia, entertainment, or schemes not present in the provided documents), refuse politely in the citizen's requested language.\n"
+        "5. ADAPTIVE ANSWER STRUCTURE:\n"
+        "   A. FOR CATALOG / LIST / OVERVIEW INQUIRIES (e.g. citizen asks 'what are the schemes available', 'give them in a list', 'list all schemes'):\n"
+        "      - Present a comprehensive, clearly structured numbered list of ALL 11 available schemes from the context.\n"
+        "      - Group them logically by sector: Agriculture & Farmers, Healthcare & Digital Health, Social Security & Insurance, Micro-Business & MSME, Women & Children.\n"
+        "      - List each scheme EXACTLY ONCE with its official full name, acronym, and a concise 1-line summary of its core benefit and financial figure.\n"
+        "      - DO NOT force the single-scheme template ('Key Benefits', 'Key Features', 'How to Apply') onto a list request!\n"
+        "      - Conclude with a helpful tip inviting the citizen to ask for in-depth eligibility or application steps for any specific scheme.\n"
+        "   B. FOR SPECIFIC CITIZEN QUESTIONS (documents, application steps, eligibility, benefits, or scheme details):\n"
+        "      - DIRECTLY AND ACCURATELY ANSWER THE CITIZEN'S SPECIFIC QUESTION first and foremost without repeating irrelevant boilerplate!\n"
+        "      - IF THE CITIZEN ASKS ABOUT REQUIRED DOCUMENTS:\n"
+        "        List the exact required documents clearly in bullet points (e.g. Aadhaar Card, Ration Card / Family ID, Land records / Khasra-Khatauni, Bank Passbook with IFSC, Mobile number, Photo) and specify where to submit them.\n"
+        "      - IF THE CITIZEN ASKS ABOUT HOW TO APPLY:\n"
+        "        Provide clear, actionable, numbered step-by-step application instructions (official portal URL, CSC / bank / hospital desk, forms to fill, verification process).\n"
+        "      - IF THE CITIZEN ASKS ABOUT ELIGIBILITY OR BENEFITS:\n"
+        "        State the exact financial coverage/amounts (e.g. ₹5 Lakh, ₹6,000/yr, ₹2 Lakh) and eligibility conditions (age, income, landholding, target groups).\n"
+        "      - IF THE CITIZEN ASKS A GENERAL OVERVIEW ABOUT A SINGLE SCHEME:\n"
+        "        Provide a concise overview with Scheme Name, Core Financial Figures & Benefits, Eligibility, and How to Apply.\n"
+        "      - NEVER append a full catalog list of all schemes when the citizen asked a question about a specific scheme!\n"
+        "      - Ensure tone is helpful, authoritative, respectful, and citizen-friendly."
+    )
+
+    if target_language == "hi":
+        system_instruction += (
+            "\n\n6. HINDI OUTPUT REQUIREMENT (हिन्दी):\n"
+            "- Output in natural, formal, respectful Hindi in Devanagari script (देवनागरी लिपि).\n"
+            "- यदि नागरिक योजनाओं की सूची या उपलब्ध योजनाओं के बारे में पूछता है, तो संदर्भ में मौजूद सभी योजनाओं की एक क्रमबद्ध सूची (श्रेणीवार) उनके मुख्य लाभ के साथ प्रस्तुत करें।\n"
+            "- यदि किसी विशिष्ट योजना के बारे में पूछा गया है, तो योजना का नाम, मुख्य वित्तीय लाभ (जैसे ₹6,000 या ₹2 लाख), पात्रता और आवेदन प्रक्रिया के स्पष्ट बिंदु दें।\n"
+            "- If and ONLY IF the question is completely outside the scope of the provided documents, politely state ONLY:\n"
+            "  'क्षमा करें, यह जानकारी उपलब्ध भारत सरकार की योजनाओं के दस्तावेज़ों के दायरे से बाहर है। आप मुझसे पीएम-किसान, आयुष्मान भारत, पीएम जीवन ज्योति बीमा, पीएम मुद्रा ऋण या अन्य योजनाओं के बारे में पूछ सकते हैं।'\n"
+            "- When you CAN answer the question from the context, NEVER append any refusal sentence."
+        )
+    elif target_language == "te":
+        system_instruction += (
+            "\n\n6. TELUGU OUTPUT REQUIREMENT (తెలుగు):\n"
+            "- Output in natural, formal, respectful Telugu in Telugu script (తెలుగు లిపి).\n"
+            "- పౌరుడు అందుబాటులో ఉన్న పథకాల జాబితా అడిగినప్పుడు, అందుబాటులో ఉన్న అన్ని పథకాలను స్పష్టమైన సంఖ్యలతో, వర్గీకరించి, ప్రతి పథకానికి 1-లైన్ ప్రధాన ప్రయోజనం (రూపాయల వివరాలతో) జాబితాగా ఇవ్వండి.\n"
+            "- ఏదైనా నిర్దిష్ట పథకం అడిగినప్పుడు, పథకం పేరు, ప్రధాన ఆర్థిక ప్రయోజనాలు (ఉదా. ₹6,000/- వార్షిక సహాయం లేదా ₹2 లక్షల కవరేజ్), అర్హతలు మరియు దరఖాస్తు విధానం స్పష్టంగా అందించండి.\n"
+            "- If and ONLY IF the question is completely outside the scope of the provided documents, politely state ONLY:\n"
+            "  'క్షమించండి, ఈ సమాచారం అందుబాటులో ఉన్న భారత ప్రభుత్వ సంక్షేమ పథకాల పత్రాల పరిధిలో లేదు. మీరు పీఎం-కిసాన్, ఆయుష్మాన్ భారత్, పీఎం జీవన్ జ్యోతి బీమా, ముద్రా రుణాలు లేదా ఇతర కేంద్ర ప్రభుత్వ పథకాల గురించి అడగవచ్చు.'\n"
+            "- When you CAN answer the question from the context, NEVER append any refusal sentence."
+        )
+    else:
+        system_instruction += (
+            "\n\n6. ENGLISH OUTPUT REQUIREMENT:\n"
+            "- Output cleanly, professionally, and concisely in English following the adaptive format above.\n"
+            "- For list/overview questions, provide the complete structured catalog grouped by sector.\n"
+            "- If and ONLY IF the question is completely outside the scope of the provided documents, strictly state ONLY:\n"
+            "  'I cannot answer this question as it is outside the scope of the provided Indian government schemes documents.'\n"
+            "- When you CAN answer the question from the context, NEVER append any refusal sentence."
+        )
+
+    call_model_id = model_id
+    if "nova-2-5-sonic" in model_id.lower() or "nova-2-sonic" in model_id.lower():
+        call_model_id = "amazon.nova-lite-v1:0"
+
+    content_list = []
+    if audio_bytes:
+        content_list.append({
+            "audio": {
+                "format": audio_format,
+                "source": {"bytes": audio_bytes}
+            }
+        })
+        content_list.append({"text": f"Context Information:\n{context_str}\n\nQuestion:\n{prompt}"})
+    else:
+        user_message = f"CTX:{context_str}\nQ:{prompt}\nA:"
+        content_list.append({"text": user_message})
+
+    converse_params: Dict[str, Any] = {
+        "modelId": call_model_id,
+        "messages": [
+            {
+                "role": "user",
+                "content": content_list
+            }
+        ],
+        "system": [
+            {"text": system_instruction}
+        ],
+        "inferenceConfig": {
+            "maxTokens": 900 if is_overview else 450,
+            "temperature": 1.0 if "devstral" in call_model_id else 0.2,
+            "topP": 0.9
+        },
+        "performanceConfig": {
+            "latency": "standard"
+        }
+    }
+
+    response = client.converse_stream(**converse_params)
+    stream = response.get("stream", [])
+
+    full_answer = ""
+    input_tokens = len(prompt or "") // 4
+    output_tokens = 0
+    audio_out_bytes = None
+
+    for event in stream:
+        if "contentBlockDelta" in event:
+            delta = event["contentBlockDelta"].get("delta", {}).get("text", "")
+            if delta:
+                full_answer += delta
+                yield "token", delta
+        elif "metadata" in event:
+            usage = event["metadata"].get("usage", {})
+            input_tokens = usage.get("inputTokens", input_tokens)
+            output_tokens = usage.get("outputTokens", len(full_answer) // 4)
+
+    if not output_tokens:
+        output_tokens = max(len(full_answer) // 4, 1)
+
+    if audio_bytes and full_answer:
+        audio_out_bytes = generate_speech_audio(
+            text=full_answer,
+            target_language=target_language,
+            is_nova_sonic=("nova" in model_id.lower())
+        )
+
+    yield "meta", (full_answer, input_tokens, output_tokens, audio_out_bytes)
+
+
 def invoke_databricks_llm(prompt: str, context_texts: List[str]) -> Tuple[str, int, int]:
     """Invokes Databricks Foundation Model Serving LLM."""
     context_str = "\n\n".join(context_texts)
@@ -885,13 +1141,33 @@ INDIC_SCHEME_PATTERNS = [
     (r'(?i)(డిజిటల్\s*హెల్త్|ఏబీడీఎం|ఎబిడిఎం|ఆభా\s*కార్డు|ఆభా|అభా|abdm|abha)', 'Ayushman Bharat Digital Mission ABDM'),
     (r'(?i)(डिजिटल\s*हेल्थ|एबीडीएम|आभा)', 'Ayushman Bharat Digital Mission ABDM'),
 
+    # PM-RAHAT (Road accident emergency trauma relief)
+    (r'(?i)(రాహత్|ప్రమాద\s*బాధితులు|రోడ్డు\s*ప్రమాదం|గోల్డెన్\s*అవర్|pm-?rahat)', 'PM-RAHAT road accident victims emergency trauma care golden hour'),
+    (r'(?i)(राहत\s*योजना|सड़क\s*दुर्घटना|रोड\s*एक्सीडेंट|गोल्डन\s*ऑवर|पीएम-?राहत)', 'PM-RAHAT road accident victims emergency trauma care golden hour'),
+
+    # SFURTI
+    (r'(?i)(స్ఫూర్తి|సాంప్రదాయ\s*పరిశ్రమ|sfurti)', 'SFURTI Scheme of Fund for Regeneration of Traditional Industries'),
+    (r'(?i)(स्फूर्ति|पारंपरिक\s*उद्योग|sfurti)', 'SFURTI Scheme of Fund for Regeneration of Traditional Industries'),
+
+    # ASPIRE
+    (r'(?i)(అస్పైర్|గ్రామీణ\s*పరిశ్రమ|ఇంక్యుబేషన్|aspire)', 'ASPIRE Scheme for Promotion of Innovation Rural Industry Entrepreneurship'),
+    (r'(?i)(एस्पायर|ग्रामीण\s*उद्योग|aspire)', 'ASPIRE Scheme for Promotion of Innovation Rural Industry Entrepreneurship'),
+
+    # MSE-CDP
+    (r'(?i)(క్లస్టర్\s*అభివృద్ధి|పరిశ్రమల\s*క్లస్టర్|mse-?cdp)', 'MSE-CDP Micro and Small Enterprises Cluster Development Programme'),
+    (r'(?i)(क्लस्टर\s*विकास|उद्योग\s*क्लस्टर|mse-?cdp)', 'MSE-CDP Micro and Small Enterprises Cluster Development Programme'),
+
     # Sukanya Samriddhi
     (r'(?i)(సుకున్య\s*సమృద్ధి|సుకున్య|సమృద్ధి|ssy)', 'Sukanya Samriddhi Yojana SSY'),
     (r'(?i)(सुकन्या\s*समृद्धि|सुकन्या|समृद्धि)', 'Sukanya Samriddhi Yojana SSY'),
 
     # Relief & Welfare Funds
-    (r'(?i)(రిలీఫ్|రాహత్|సంక్షేమ\s*నిధి|ఫండ్)', 'relief assistance fund scheme'),
-    (r'(?i)(राहत|कल्याण\s*निधि|फंड)', 'relief assistance fund scheme')
+    (r'(?i)(రిలీఫ్|సంక్షేమ\s*నిధి|ఫండ్)', 'relief assistance fund scheme'),
+    (r'(?i)(कल्याण\s*निधि|फंड)', 'relief assistance fund scheme'),
+
+    # General / Catalog Scheme Queries (Instant translation bypassing Bedrock LLM)
+    (r'(?i)(పథకాలు|ప్రభుత్వ\s*పథకాలు|అన్ని\s*పథకాలు|పథకాల\s*జాబితా|సంక్షేమ\s*పథకాలు|ఏ\s*పథకాలు)', 'government schemes official catalog list central welfare initiatives'),
+    (r'(?i)(योजनाएं|सरकारी\s*योजनाएं|सभी\s*योजनाएं|योजनाओं\s*की\s*सूची|कल्याणकारी\s*योजनाएं|कौन\s*सी\s*योजना)', 'government schemes official catalog list central welfare initiatives')
 ]
 
 # Indic Query Intent Patterns (Eligibility, Benefits, Application, Documents)
@@ -916,6 +1192,7 @@ def translate_query_for_search(query: str, target_language: str = "en") -> str:
     Translates Indic language queries (Telugu, Hindi) into search-optimized English keywords
     so Databricks English Vector Embedding index ('databricks-gte-large-en')
     accurately retrieves relevant government scheme documents without non-ASCII embedding mismatch.
+    Utilizes LRU caching to eliminate repeated LLM translation latency.
     """
     if not query or not query.strip():
         return query
@@ -923,6 +1200,12 @@ def translate_query_for_search(query: str, target_language: str = "en") -> str:
     has_indic = bool(re.search(r'[\u0900-\u097F\u0C00-\u0C7F]', query))
     if not has_indic and target_language not in ["hi", "te"]:
         return query.strip()
+
+    cache_key = f"{target_language}_{query.strip().lower()}"
+    with _CACHE_LOCK:
+        if cache_key in _TRANSLATION_CACHE:
+            _TRANSLATION_CACHE.move_to_end(cache_key)
+            return _TRANSLATION_CACHE[cache_key]
 
     # Step 1: Fast pattern matching over known Indian government scheme aliases & query intents
     matched_schemes = []
@@ -942,6 +1225,10 @@ def translate_query_for_search(query: str, target_language: str = "en") -> str:
             print(f"[RAG TRANSLATION] Pattern dictionary matched scheme: '{combined}'")
         except Exception:
             pass
+        with _CACHE_LOCK:
+            _TRANSLATION_CACHE[cache_key] = combined
+            if len(_TRANSLATION_CACHE) > MAX_TRANSLATION_CACHE_SIZE:
+                _TRANSLATION_CACHE.popitem(last=False)
         return combined
 
     # Step 2: Bedrock Converse LLM translation for general / unmapped Indic queries
@@ -974,6 +1261,10 @@ def translate_query_for_search(query: str, target_language: str = "en") -> str:
                 print(f"[RAG TRANSLATION] Bedrock translated: '{cleaned_english}'")
             except Exception:
                 pass
+            with _CACHE_LOCK:
+                _TRANSLATION_CACHE[cache_key] = cleaned_english
+                if len(_TRANSLATION_CACHE) > MAX_TRANSLATION_CACHE_SIZE:
+                    _TRANSLATION_CACHE.popitem(last=False)
             return cleaned_english
     except Exception as e:
         try:
@@ -983,11 +1274,17 @@ def translate_query_for_search(query: str, target_language: str = "en") -> str:
 
     # Fallback if both pattern matching and LLM translation fail
     if matched_intents:
-        return "government schemes " + " ".join(matched_intents)
+        fallback_res = "government schemes " + " ".join(matched_intents)
+    else:
+        # Fallback to Latin-only characters
+        fallback_latin = re.sub(r'[^\x20-\x7E]', ' ', query).strip()
+        fallback_res = fallback_latin if len(fallback_latin) >= 3 else "government scheme eligibility details"
 
-    # Fallback to Latin-only characters
-    fallback_latin = re.sub(r'[^\x20-\x7E]', ' ', query).strip()
-    return fallback_latin if len(fallback_latin) >= 3 else "government scheme eligibility details"
+    with _CACHE_LOCK:
+        _TRANSLATION_CACHE[cache_key] = fallback_res
+        if len(_TRANSLATION_CACHE) > MAX_TRANSLATION_CACHE_SIZE:
+            _TRANSLATION_CACHE.popitem(last=False)
+    return fallback_res
 
 
 
@@ -1003,7 +1300,7 @@ def execute_rag_pipeline(
 ) -> Dict[str, Any]:
     """
     Full end-to-end RAG execution with Hindi/Telugu Beta translation support:
-    0a. Automatic Indic language detection (Telugu/Hindi script and transliterated roman)
+    0a. Automatic Indic language detection (Telugu/Hindi script)
     0b. Security: Prompt injection check & PII Masking
     1. Embed query (databricks-gte-large-en)
     2. Vector search (rag_catalog.rag_gov_schema.gold_vector_index)
@@ -1020,12 +1317,6 @@ def execute_rag_pipeline(
         detected_lang = "te"
     elif bool(re.search(r'[\u0900-\u097F]', user_query)):
         detected_lang = "hi"
-    elif detected_lang == "en":
-        # Detect romanized Telugu or Hindi keywords
-        if bool(re.search(r'\b(cheyali|cheyandi|arhatalu|pathakam|padhakam|dabbu|dabbulu|kavali|darakhastu|ento|telupandi|evariki|evvaru|evaru|bharoosa|raithu|rythu|prabhutva|paddhathi)\b', user_query, re.I)):
-            detected_lang = "te"
-        elif bool(re.search(r'\b(kaise|karein|karna|patrata|kitna|kitne|paise|rupya|bataiye|chahiye|dastavez|kagaz|kisko|milega|pradhan\s*mantri|sarkari)\b', user_query, re.I)):
-            detected_lang = "hi"
 
     # 0a. Conversational Greeting Check (Only when user explicitly greets)
     clean_lower = re.sub(r'[^a-zA-Z\s]', '', user_query.strip().lower()).strip()
@@ -1059,20 +1350,20 @@ def execute_rag_pipeline(
         ot = len(greeting_text) // 4
         ic, oc, _ = calculate_turn_cost("gemma", it, ot)
 
-        try:
-            log_user_query(qid, user_query, greeting_text, BATCH_ID)
-            log_observability(str(uuid.uuid4()), qid, lat, it, ot, ic, oc, True, False, False, user_query)
-            log_retrieval(str(uuid.uuid4()), qid, [], [], [], 0)
-        except Exception as _e:
-            print(f"[GREETING LOG NOTICE] {_e}")
+        submit_async_db_logging([
+            (log_user_query, (qid, user_query, greeting_text, BATCH_ID)),
+            (log_observability, (str(uuid.uuid4()), qid, lat, it, ot, ic, oc, True, False, False, user_query)),
+            (log_retrieval, (str(uuid.uuid4()), qid, [], [], [], 0)),
+        ])
 
-        # Synthesize audio for greetings if requested in regional voice, Nova Sonic, or voice turn
+        # Synthesize audio for greetings only if voice was actively used or Nova Sonic selected
         greeting_audio = None
-        if detected_lang in ["hi", "te"] or "nova" in selected_model.lower() or audio_bytes or is_voice:
+        is_nova_greeting = "nova" in selected_model.lower() or "sonic" in selected_model.lower()
+        if audio_bytes or is_nova_greeting:
             greeting_audio = generate_speech_audio(
                 text=greeting_text,
                 target_language=detected_lang,
-                is_nova_sonic=("nova" in selected_model.lower())
+                is_nova_sonic=is_nova_greeting
             )
 
         return {
@@ -1111,7 +1402,7 @@ def execute_rag_pipeline(
     primary_safety_cat = guard_res.get("primary_safety_category", None)
     safe_question = guard_res["safe_query"] if guard_res["safe_query"] else guard_res["masked_text"]
 
-    # 0c. Content Safety Enforcement (Profanity, Hate, Violent, Harmful, Sexual, Sexual Violence)
+    # 0c. Content Safety Enforcement (Hate, Violent, Harmful, Sexual, Sexual Violence)
     if safety_violated:
         cats_label = ", ".join(safety_cats)
         if detected_lang == "hi":
@@ -1122,12 +1413,11 @@ def execute_rag_pipeline(
             safety_msg = f"I cannot process this request as it contains content that violates our safety policies ({cats_label})."
 
         lat = (time.time() - t0) * 1000
-        try:
-            log_user_query(qid, user_query, safety_msg, BATCH_ID)
-            log_observability(str(uuid.uuid4()), qid, lat, 10, 20, 0.0, 0.0, False, True, pii_masked, safe_question)
-            log_retrieval(str(uuid.uuid4()), qid, [], [], [], 0)
-        except Exception as _e:
-            print(f"[SAFETY BLOCK LOG NOTICE] {_e}")
+        submit_async_db_logging([
+            (log_user_query, (qid, user_query, safety_msg, BATCH_ID)),
+            (log_observability, (str(uuid.uuid4()), qid, lat, 10, 20, 0.0, 0.0, False, True, pii_masked, safe_question)),
+            (log_retrieval, (str(uuid.uuid4()), qid, [], [], [], 0)),
+        ])
 
         return {
             "question_id": qid,
@@ -1162,12 +1452,11 @@ def execute_rag_pipeline(
     if injection_detected and not guard_res["safe_query"]:
         block_msg = f"I cannot process this request as it contains unauthorized instructions or commands ({injection_cat})."
         lat = (time.time() - t0) * 1000
-        try:
-            log_user_query(qid, user_query, block_msg, BATCH_ID)
-            log_observability(str(uuid.uuid4()), qid, lat, 10, 20, 0.0, 0.0, False, True, pii_masked, safe_question)
-            log_retrieval(str(uuid.uuid4()), qid, [], [], [], 0)
-        except Exception as _e:
-            print(f"[SECURITY BLOCK LOG NOTICE] {_e}")
+        submit_async_db_logging([
+            (log_user_query, (qid, user_query, block_msg, BATCH_ID)),
+            (log_observability, (str(uuid.uuid4()), qid, lat, 10, 20, 0.0, 0.0, False, True, pii_masked, safe_question)),
+            (log_retrieval, (str(uuid.uuid4()), qid, [], [], [], 0)),
+        ])
 
         return {
             "question_id": qid,
@@ -1226,7 +1515,7 @@ def execute_rag_pipeline(
         target_language=detected_lang
     )
 
-    # Audio is automatically generated for Amazon Nova 2.5 Sonic Voice-to-Voice queries, active voice turns, or audio input
+    # Audio is automatically generated for Amazon Nova 2.5 Sonic Voice-to-Voice queries or active audio input
     is_nova = "nova" in str(selected_model).lower() or "sonic" in str(selected_model).lower()
     if (audio_bytes or is_nova or is_voice) and not audio_out and answer:
         audio_out = generate_speech_audio(
@@ -1240,16 +1529,12 @@ def execute_rag_pipeline(
     ic, oc, _tot = calculate_turn_cost(model_used, it, ot)
     able = check_llm_answering(answer)
 
-    # 5. Log everything to Databricks tables as per reference app.py
-    for _fn, _args in [
+    # 5. Log everything to Databricks tables asynchronously in the background (eliminates 2-4.5s wait)
+    submit_async_db_logging([
         (log_user_query, (qid, safe_question, answer, BATCH_ID)),
         (log_observability, (str(uuid.uuid4()), qid, lat, it, ot, ic, oc, able, injection_detected, pii_masked, safe_question)),
         (log_retrieval, (str(uuid.uuid4()), qid, cids, scores, texts, len(cids))),
-    ]:
-        try:
-            _fn(*_args)
-        except Exception as _e:
-            print(f"[DB LOGGING NOTICE] {_fn.__name__} failed: {_e}")
+    ])
 
     return {
         "question_id": qid,
@@ -1276,6 +1561,340 @@ def execute_rag_pipeline(
             "pii_masked": pii_masked,
             "pii_categories": pii_cats,
             "has_multiple_threats": pii_masked and (injection_detected or safety_violated)
+        }
+    }
+
+
+def execute_rag_pipeline_stream(
+    user_query: str,
+    selected_model: str = "Auto",
+    audio_bytes: Optional[bytes] = None,
+    audio_format: str = "wav",
+    num_results: int = 5,
+    is_first_turn: bool = False,
+    target_language: str = "en",
+    is_voice: bool = False
+):
+    """
+    End-to-end RAG stream generator supporting Server-Sent Events (SSE).
+    Yields:
+      {"event": "token", "data": {"token": str}}
+      {"event": "done", "data": dict}
+    """
+    qid = str(uuid.uuid4())
+    t0 = time.time()
+
+    # Automatically detect language from user query if target_language is default "en"
+    detected_lang = target_language
+    if bool(re.search(r'[\u0C00-\u0C7F]', user_query)):
+        detected_lang = "te"
+    elif bool(re.search(r'[\u0900-\u097F]', user_query)):
+        detected_lang = "hi"
+
+    # 0a. Conversational Greeting Check
+    clean_lower = re.sub(r'[^a-zA-Z\s]', '', user_query.strip().lower()).strip()
+    is_greeting = clean_lower in {
+        "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
+        "namaste", "vanakkam", "greetings", "howdy", "hi there", "hello there",
+        "help", "hi assistant", "hello assistant", "who are you", "what can you do"
+    } or bool(re.match(r'^(hi|hello|hey|namaste|greetings)\s*$', clean_lower))
+
+    if is_greeting:
+        if detected_lang == "hi":
+            greeting_text = (
+                "नमस्ते! मैं आपका एआई सरकारी योजना सहायक हूँ। मैं आपकी क्या मदद कर सकता हूँ? "
+                "आप मुझसे आयुष्मान भारत (PM-JAY), पीएम-किसान, पीएम आवास योजना, पीएम मुद्रा ऋण, "
+                "बेटी बचाओ बेटी पढ़ाओ, पेंशन और छात्रवृत्ति योजनाओं की पात्रता, आवश्यक दस्तावेज़ और सब्सिडी के बारे में पूछ सकते हैं।"
+            )
+        elif detected_lang == "te":
+            greeting_text = (
+                "నమస్కారం! నేను మీ ప్రభుత్వ సంక్షేమ పథకాల ఏఐ సహాయకుడిని. నేను మీకు ఎలా సహాయపడగలను? "
+                "మీరు నన్ను ఆయుష్మాన్ భారత్ (PM-JAY), పీఎం-కిసాన్, పీఎం ఆవాస్ యోజన, పీఎం ముద్రా రుణాలు, "
+                "బేటీ బచావో బేటీ పఢావో, పెన్షన్లు మరియు స్కాలర్‌షిప్‌ల అర్హత, దరఖాస్తు పత్రాలు మరియు రాయితీల గురించి అడగవచ్చు."
+            )
+        else:
+            greeting_text = (
+                "Namaste! I am your AI Government Schemes Assistant. How can I help you today? "
+                "You can ask me about central and state welfare initiatives, eligibility criteria, required documents, and subsidies for schemes such as "
+                "Ayushman Bharat (PM-JAY), PM-KISAN, Pradhan Mantri Awas Yojana, PM Mudra Yojana, Beti Bachao Beti Padhao, pensions, and scholarships."
+            )
+
+        # Stream greeting words cleanly
+        words = re.findall(r'\S+|\s+', greeting_text)
+        for w_tok in words:
+            yield {"event": "token", "data": {"token": w_tok}}
+
+        lat = (time.time() - t0) * 1000
+        it = max(len(user_query) // 4, 2)
+        ot = len(greeting_text) // 4
+        ic, oc, _ = calculate_turn_cost("gemma", it, ot)
+
+        submit_async_db_logging([
+            (log_user_query, (qid, user_query, greeting_text, BATCH_ID)),
+            (log_observability, (str(uuid.uuid4()), qid, lat, it, ot, ic, oc, True, False, False, user_query)),
+            (log_retrieval, (str(uuid.uuid4()), qid, [], [], [], 0)),
+        ])
+
+        greeting_audio = None
+        is_nova_greeting = "nova" in selected_model.lower() or "sonic" in selected_model.lower()
+        if audio_bytes or is_nova_greeting:
+            greeting_audio = generate_speech_audio(
+                text=greeting_text,
+                target_language=detected_lang,
+                is_nova_sonic=is_nova_greeting
+            )
+
+        yield {
+            "event": "done",
+            "data": {
+                "question_id": qid,
+                "raw_question": user_query,
+                "masked_question": user_query,
+                "answer": greeting_text,
+                "audio_response": greeting_audio,
+                "retrieved_chunks": [],
+                "retrieved_scores": [],
+                "retrieved_chunk_ids": [],
+                "latency_ms": lat,
+                "input_tokens": it,
+                "output_tokens": ot,
+                "input_cost": ic,
+                "output_cost": oc,
+                "llm_able_to_answer": True,
+                "model_used": "Gemma 3 12B IT (Greeting)",
+                "security": {
+                    "injection_detected": False,
+                    "injection_category": None,
+                    "pii_masked": False,
+                    "pii_categories": []
+                }
+            }
+        }
+        return
+
+    # 0b. Security scan
+    guard_res = scan_security_guardrails(user_query)
+    pii_masked = guard_res["pii_masked"]
+    pii_cats = guard_res["pii_categories"]
+    injection_detected = guard_res["injection_detected"]
+    injection_cat = guard_res["primary_injection_category"]
+    injection_cats = guard_res["injection_categories"]
+    safety_violated = guard_res.get("safety_violated", False)
+    safety_cats = guard_res.get("safety_categories", [])
+    primary_safety_cat = guard_res.get("primary_safety_category", None)
+    safe_question = guard_res["safe_query"] if guard_res["safe_query"] else guard_res["masked_text"]
+
+    if safety_violated:
+        cats_label = ", ".join(safety_cats)
+        if detected_lang == "hi":
+            safety_msg = f"क्षमा करें, यह अनुरोध अस्वीकार कर दिया गया है क्योंकि इसमें अस्वीकार्य सामग्री पाई गई है ({cats_label})।"
+        elif detected_lang == "te":
+            safety_msg = f"క్షమించండి, మీ అభ్యర్థనలో నిబంధనలకు విరుద్ధమైన కంటెంట్ ఉన్నందున ప్రాసెస్ చేయలేము ({cats_label})."
+        else:
+            safety_msg = f"I cannot process this request as it contains content that violates our safety policies ({cats_label})."
+
+        for w_tok in re.findall(r'\S+|\s+', safety_msg):
+            yield {"event": "token", "data": {"token": w_tok}}
+
+        lat = (time.time() - t0) * 1000
+        submit_async_db_logging([
+            (log_user_query, (qid, user_query, safety_msg, BATCH_ID)),
+            (log_observability, (str(uuid.uuid4()), qid, lat, 10, 20, 0.0, 0.0, False, True, pii_masked, safe_question)),
+            (log_retrieval, (str(uuid.uuid4()), qid, [], [], [], 0)),
+        ])
+
+        yield {
+            "event": "done",
+            "data": {
+                "question_id": qid,
+                "raw_question": user_query,
+                "masked_question": safe_question,
+                "answer": safety_msg,
+                "audio_response": None,
+                "retrieved_chunks": [],
+                "retrieved_scores": [],
+                "retrieved_chunk_ids": [],
+                "latency_ms": lat,
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "input_cost": 0.0,
+                "output_cost": 0.0,
+                "llm_able_to_answer": False,
+                "model_used": "Safety Policy Guardrail",
+                "security": {
+                    "injection_detected": injection_detected,
+                    "injection_category": injection_cat,
+                    "injection_categories": injection_cats,
+                    "safety_violated": True,
+                    "safety_categories": safety_cats,
+                    "primary_safety_category": primary_safety_cat,
+                    "pii_masked": pii_masked,
+                    "pii_categories": pii_cats,
+                    "has_multiple_threats": True
+                }
+            }
+        }
+        return
+
+    if injection_detected and not guard_res["safe_query"]:
+        block_msg = f"I cannot process this request as it contains unauthorized instructions or commands ({injection_cat})."
+        for w_tok in re.findall(r'\S+|\s+', block_msg):
+            yield {"event": "token", "data": {"token": w_tok}}
+
+        lat = (time.time() - t0) * 1000
+        submit_async_db_logging([
+            (log_user_query, (qid, user_query, block_msg, BATCH_ID)),
+            (log_observability, (str(uuid.uuid4()), qid, lat, 10, 20, 0.0, 0.0, False, True, pii_masked, safe_question)),
+            (log_retrieval, (str(uuid.uuid4()), qid, [], [], [], 0)),
+        ])
+
+        yield {
+            "event": "done",
+            "data": {
+                "question_id": qid,
+                "raw_question": user_query,
+                "masked_question": safe_question,
+                "answer": block_msg,
+                "audio_response": None,
+                "retrieved_chunks": [],
+                "retrieved_scores": [],
+                "retrieved_chunk_ids": [],
+                "latency_ms": lat,
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "input_cost": 0.0,
+                "output_cost": 0.0,
+                "llm_able_to_answer": False,
+                "model_used": "Security Guardrail",
+                "security": {
+                    "injection_detected": True,
+                    "injection_category": injection_cat,
+                    "injection_categories": injection_cats,
+                    "pii_masked": pii_masked,
+                    "pii_categories": pii_cats,
+                    "has_multiple_threats": pii_masked and injection_detected
+                }
+            }
+        }
+        return
+
+    # 1. Indic Translation for Databricks GTE-Large-EN vector index
+    search_query = translate_query_for_search(safe_question, detected_lang)
+
+    # 2. Embedding + Vector Search using search_query
+    cids, scores, texts = query_databricks_vector_search(search_query, num_results=num_results)
+
+    # 3. Detect overview / catalog listing query: inject complete official catalog
+    if is_overview_or_catalog_query(safe_question):
+        texts.insert(0, OFFICIAL_SCHEMES_CATALOG_CONTEXT)
+        cids.insert(0, "official_schemes_catalog")
+        scores.insert(0, 1.0)
+    else:
+        # Prepend authoritative verified scheme guidelines if inquiry matches a specific government scheme
+        scheme_ctx = find_relevant_scheme_context(search_query) or find_relevant_scheme_context(safe_question)
+        if scheme_ctx:
+            texts.insert(0, scheme_ctx)
+            cids.insert(0, "official_scheme_verified_guidelines")
+            scores.insert(0, 1.0)
+
+    # 4. Stream Bedrock or Fallback LLM tokens
+    if audio_bytes and selected_model == "Auto":
+        candidates = [BEDROCK_MODEL_4, BEDROCK_MODEL_1, BEDROCK_MODEL_2, BEDROCK_MODEL_3]
+    elif selected_model and selected_model != "Auto":
+        candidates = [selected_model]
+        for m in BEDROCK_MODELS:
+            if m not in candidates:
+                candidates.append(m)
+    else:
+        candidates = list(BEDROCK_MODELS)
+
+    full_answer = ""
+    in_tok = 0
+    out_tok = 0
+    audio_out = None
+    model_used = candidates[0]
+    stream_succeeded = False
+
+    for model_id in candidates:
+        try:
+            for event_type, val in invoke_bedrock_converse_stream(
+                model_id=model_id,
+                prompt=safe_question,
+                context_texts=texts,
+                audio_bytes=audio_bytes if "nova-2-5-sonic" in model_id else None,
+                audio_format=audio_format,
+                target_language=detected_lang
+            ):
+                if event_type == "token":
+                    yield {"event": "token", "data": {"token": val}}
+                elif event_type == "meta":
+                    full_answer, in_tok, out_tok, audio_out = val
+            if full_answer:
+                model_used = "Amazon Nova 2.5 Sonic" if ("nova-2-5-sonic" in model_id or "nova" in model_id.lower()) else model_id
+                stream_succeeded = True
+                break
+        except Exception as e:
+            print(f"[STREAM FALLBACK NOTICE] Model '{model_id}' stream failed: {e}")
+
+    # Fallback to Databricks LLM if Bedrock failed
+    if not stream_succeeded:
+        try:
+            full_answer, in_tok, out_tok = invoke_databricks_llm(safe_question, texts)
+            model_used = f"Databricks: {DATABRICKS_FALLBACK_LLM}"
+            for w_tok in re.findall(r'\S+|\s+', full_answer):
+                yield {"event": "token", "data": {"token": w_tok}}
+            stream_succeeded = True
+        except Exception as e:
+            full_answer = f"⚠️ Inference service is temporarily busy. Please retry shortly. ({e})"
+            for w_tok in re.findall(r'\S+|\s+', full_answer):
+                yield {"event": "token", "data": {"token": w_tok}}
+
+    is_nova = "nova" in str(selected_model).lower() or "sonic" in str(selected_model).lower()
+    if (audio_bytes or is_nova or is_voice) and not audio_out and full_answer:
+        audio_out = generate_speech_audio(
+            text=full_answer,
+            target_language=detected_lang,
+            is_nova_sonic=is_nova
+        )
+
+    lat = (time.time() - t0) * 1000
+    ic, oc, _tot = calculate_turn_cost(model_used, in_tok, out_tok)
+    able = check_llm_answering(full_answer)
+
+    submit_async_db_logging([
+        (log_user_query, (qid, safe_question, full_answer, BATCH_ID)),
+        (log_observability, (str(uuid.uuid4()), qid, lat, in_tok, out_tok, ic, oc, able, injection_detected, pii_masked, safe_question)),
+        (log_retrieval, (str(uuid.uuid4()), qid, cids, scores, texts, len(cids))),
+    ])
+
+    yield {
+        "event": "done",
+        "data": {
+            "question_id": qid,
+            "raw_question": user_query,
+            "masked_question": safe_question,
+            "answer": full_answer,
+            "audio_response": audio_out,
+            "retrieved_chunks": texts,
+            "retrieved_scores": scores,
+            "retrieved_chunk_ids": cids,
+            "latency_ms": lat,
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "input_cost": ic,
+            "output_cost": oc,
+            "llm_able_to_answer": able,
+            "model_used": model_used,
+            "security": {
+                "injection_detected": injection_detected,
+                "injection_category": injection_cat or None,
+                "injection_categories": injection_cats,
+                "safety_violated": safety_violated,
+                "safety_categories": safety_cats,
+                "pii_masked": pii_masked,
+                "pii_categories": pii_cats,
+                "has_multiple_threats": pii_masked and (injection_detected or safety_violated)
+            }
         }
     }
 

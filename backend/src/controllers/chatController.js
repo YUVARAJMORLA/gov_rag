@@ -1,8 +1,16 @@
+const http = require('http');
 const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
 const { ChatSession, ChatMessage } = require('../models/store');
 
 const PYTHON_BRIDGE_URL = process.env.PYTHON_BRIDGE_URL || 'http://127.0.0.1:5001';
+
+// High-performance pooled HTTP client with keep-alive to Python bridge
+const pyBridgeClient = axios.create({
+  baseURL: PYTHON_BRIDGE_URL,
+  timeout: 60000,
+  httpAgent: new http.Agent({ keepAlive: true, maxSockets: 50, keepAliveMsecs: 30000 })
+});
 
 // 1. SEND CHAT QUERY (Text or Transcribed Voice)
 exports.sendQuery = async (req, res) => {
@@ -48,14 +56,14 @@ exports.sendQuery = async (req, res) => {
     // Notice: User identity (SSN, name, email) is NOT passed to Databricks!
     let ragResponse = null;
     try {
-      const response = await axios.post(`${PYTHON_BRIDGE_URL}/api/rag/query`, {
+      const response = await pyBridgeClient.post('/api/rag/query', {
         query: query.trim(),
         model,
         num_results: Number(numResults) || 5,
         is_first_turn: isFirstTurn,
         target_language: targetLanguage,
         is_voice: Boolean(isVoice)
-      }, { timeout: 60000 });
+      });
 
       if (response.data && response.data.success) {
         ragResponse = response.data.data;
@@ -169,6 +177,220 @@ exports.sendQuery = async (req, res) => {
   }
 };
 
+// 1b. SEND CHAT QUERY VIA SERVER-SENT EVENTS (SSE) STREAMING
+exports.sendQueryStream = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { sessionId, query, model = 'Auto', numResults = 5, targetLanguage = 'en', isVoice = false } = req.body;
+
+    if (!sessionId || !query || !query.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Both sessionId and a non-empty query are required.'
+      });
+    }
+
+    // Verify session ownership
+    const session = await ChatSession.findOne({ _id: sessionId, userId });
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        error: 'Session not found or access denied.'
+      });
+    }
+
+    const questionId = uuidv4();
+    const priorUserMessagesCount = await ChatMessage.countDocuments({ sessionId, role: 'user' });
+    const isFirstTurn = priorUserMessagesCount === 0;
+
+    // 1. Record User Prompt in MongoDB / local store
+    const userMsg = await ChatMessage.create({
+      sessionId,
+      userId,
+      questionId,
+      role: 'user',
+      content: query.trim(),
+      maskedContent: query.trim(),
+      createdAt: new Date().toISOString()
+    });
+
+    // 2. Set SSE Headers on Response
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (res.flushHeaders) res.flushHeaders();
+
+    // Send initial start event with userMessage
+    res.write(`data: ${JSON.stringify({
+      event: 'start',
+      data: {
+        questionId,
+        userMessage: {
+          id: String(userMsg._id || userMsg.id),
+          questionId,
+          role: 'user',
+          content: userMsg.content,
+          createdAt: userMsg.createdAt
+        }
+      }
+    })}\n\n`);
+
+    // 3. Connect to Python RAG Stream
+    let pyStream;
+    try {
+      pyStream = await pyBridgeClient.post('/api/rag/query-stream', {
+        query: query.trim(),
+        model,
+        num_results: Number(numResults) || 5,
+        is_first_turn: isFirstTurn,
+        target_language: targetLanguage,
+        is_voice: Boolean(isVoice)
+      }, {
+        responseType: 'stream',
+        timeout: 90000
+      });
+    } catch (streamErr) {
+      console.error('[PYTHON STREAM ERROR]', streamErr.message);
+      res.write(`data: ${JSON.stringify({
+        event: 'error',
+        data: { error: 'Failed to connect to AI streaming engine.' }
+      })}\n\n`);
+      return res.end();
+    }
+
+    let buffer = '';
+    pyStream.data.on('data', async (chunk) => {
+      buffer += chunk.toString('utf8');
+      const lines = buffer.split('\n\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const jsonStr = trimmed.replace(/^data:\s*/, '');
+        try {
+          const { event, data } = JSON.parse(jsonStr);
+
+          if (event === 'token') {
+            res.write(`data: ${JSON.stringify({ event: 'token', data })}\n\n`);
+          } else if (event === 'done') {
+            // When Python completes generation, save assistant message to DB
+            const finalQuestionId = data.question_id || questionId;
+            const assistantMsg = await ChatMessage.create({
+              sessionId,
+              userId,
+              questionId: finalQuestionId,
+              role: 'assistant',
+              content: data.answer || '',
+              maskedContent: data.masked_question || '',
+              modelUsed: data.model_used || model,
+              retrievedChunks: data.retrieved_chunks || [],
+              retrievedScores: data.retrieved_scores || [],
+              metrics: {
+                latencyMs: data.latency_ms || 0,
+                inputTokens: data.input_tokens || 0,
+                outputTokens: data.output_tokens || 0,
+                inputCost: data.input_cost || 0,
+                outputCost: data.output_cost || 0,
+                llmAbleToAnswer: data.llm_able_to_answer !== undefined ? data.llm_able_to_answer : true,
+                piiMasked: data.security?.pii_masked || false,
+                piiCategories: data.security?.pii_categories || [],
+                injectionDetected: data.security?.injection_detected || false,
+                injectionCategory: data.security?.injection_category || null,
+                injectionCategories: data.security?.injection_categories || [],
+                safetyViolated: data.security?.safety_violated || false,
+                safetyCategories: data.security?.safety_categories || [],
+                hasMultipleThreats: data.security?.has_multiple_threats || false
+              },
+              createdAt: new Date().toISOString()
+            });
+
+            // Auto rename session if needed
+            let updatedSessionTitle = session.title;
+            if (
+              !session.title ||
+              session.title === 'New Conversation' ||
+              session.title === 'Welcome Session' ||
+              session.title.startsWith('Inquiry #')
+            ) {
+              const trimmedQuery = query.trim();
+              updatedSessionTitle = trimmedQuery.length > 36 ? trimmedQuery.substring(0, 33) + '...' : trimmedQuery;
+              await ChatSession.findByIdAndUpdate(sessionId, {
+                title: updatedSessionTitle,
+                updatedAt: new Date().toISOString()
+              });
+            } else {
+              await ChatSession.findByIdAndUpdate(sessionId, {
+                updatedAt: new Date().toISOString()
+              });
+            }
+
+            // Emit final done event to client with full assistant message
+            res.write(`data: ${JSON.stringify({
+              event: 'done',
+              data: {
+                questionId: finalQuestionId,
+                sessionTitle: updatedSessionTitle,
+                userMessage: {
+                  id: String(userMsg._id || userMsg.id),
+                  questionId: finalQuestionId,
+                  role: 'user',
+                  content: userMsg.content,
+                  createdAt: userMsg.createdAt
+                },
+                assistantMessage: {
+                  id: String(assistantMsg._id || assistantMsg.id),
+                  questionId: finalQuestionId,
+                  role: 'assistant',
+                  content: assistantMsg.content,
+                  maskedContent: assistantMsg.maskedContent,
+                  modelUsed: assistantMsg.modelUsed,
+                  audioBase64: data.audio_base64 || null,
+                  retrievedChunks: assistantMsg.retrievedChunks,
+                  retrievedScores: assistantMsg.retrievedScores,
+                  metrics: assistantMsg.metrics,
+                  createdAt: assistantMsg.createdAt
+                }
+              }
+            })}\n\n`);
+          } else if (event === 'error') {
+            res.write(`data: ${JSON.stringify({ event: 'error', data })}\n\n`);
+          }
+        } catch (jsonErr) {
+          console.warn('[SSE CHUNK PARSE NOTICE]', jsonErr.message);
+        }
+      }
+    });
+
+    pyStream.data.on('end', () => {
+      res.end();
+    });
+
+    pyStream.data.on('error', (err) => {
+      console.warn('[PYTHON STREAM ERROR]', err.message);
+      res.write(`data: ${JSON.stringify({ event: 'error', data: { error: err.message } })}\n\n`);
+      res.end();
+    });
+
+    req.on('close', () => {
+      try {
+        pyStream.data?.destroy?.();
+      } catch (_) {}
+    });
+
+  } catch (err) {
+    console.error('[SEND QUERY STREAM ERROR]', err);
+    if (!res.headersSent) {
+      return res.status(500).json({
+        success: false,
+        error: 'An internal error occurred while streaming response.'
+      });
+    }
+    res.end();
+  }
+};
+
 // 2. SUBMIT FEEDBACK (1-5 RATING) - Idempotent
 exports.submitFeedback = async (req, res) => {
   try {
@@ -200,7 +422,7 @@ exports.submitFeedback = async (req, res) => {
 
     // 2. Forward to Python service to log into Databricks rag_feedback table
     try {
-      await axios.post(`${PYTHON_BRIDGE_URL}/api/databricks/feedback`, {
+      await pyBridgeClient.post('/api/databricks/feedback', {
         question_id: questionId,
         rating: Number(rating),
         feedback: feedbackText || `rating_${rating}`
@@ -231,7 +453,7 @@ exports.synthesizeSpeech = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Text is required for speech synthesis.' });
     }
 
-    const response = await axios.post(`${PYTHON_BRIDGE_URL}/api/voice/synthesize`, {
+    const response = await pyBridgeClient.post('/api/voice/synthesize', {
       text: text.trim(),
       target_language: targetLanguage,
       voice_gender: voiceGender,

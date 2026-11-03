@@ -20,7 +20,7 @@ import time
 import uuid
 import json
 import traceback
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 from dotenv import load_dotenv
 
 # Load workspace environment variables
@@ -50,9 +50,11 @@ try:
     )
     from rag_service import (
         execute_rag_pipeline,
+        execute_rag_pipeline_stream,
         query_databricks_vector_search,
         calculate_turn_cost,
         get_model_pricing,
+        submit_async_db_logging,
         BEDROCK_MODEL_PRICING,
         BEDROCK_MODELS,
         BEDROCK_MODEL_1,
@@ -127,6 +129,58 @@ def rag_query():
             "error": str(e)
         }), 500
 
+@app.route('/api/rag/query-stream', methods=['POST'])
+def rag_query_stream():
+    """Execute text query against RAG pipeline with Server-Sent Events (SSE) token streaming."""
+    try:
+        data = request.get_json(force=True) or {}
+        user_query = data.get("query", "").strip()
+        selected_model = data.get("model", "Auto")
+        num_results = int(data.get("num_results", 5))
+        is_first_turn = bool(data.get("is_first_turn", False))
+        target_language = data.get("target_language", "en")
+        is_voice = bool(data.get("is_voice", False))
+
+        if not user_query:
+            return jsonify({"error": "Query string is required"}), 400
+
+        def generate_sse():
+            try:
+                for item in execute_rag_pipeline_stream(
+                    user_query=user_query,
+                    selected_model=selected_model,
+                    num_results=num_results,
+                    is_first_turn=is_first_turn,
+                    target_language=target_language,
+                    is_voice=is_voice
+                ):
+                    event_type = item.get("event", "message")
+                    event_data = item.get("data", {})
+                    if event_type == "done" and event_data.get("audio_response") and isinstance(event_data["audio_response"], bytes):
+                        import base64
+                        event_data["audio_base64"] = base64.b64encode(event_data["audio_response"]).decode('ascii')
+                        event_data["audio_response"] = None
+                    
+                    payload = json.dumps({"event": event_type, "data": event_data}, ensure_ascii=False)
+                    yield f"data: {payload}\n\n"
+            except Exception as stream_err:
+                traceback.print_exc()
+                err_payload = json.dumps({"event": "error", "data": {"error": str(stream_err)}})
+                yield f"data: {err_payload}\n\n"
+
+        return Response(stream_with_context(generate_sse()), mimetype='text/event-stream', headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+            'Access-Control-Allow-Origin': '*'
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
 @app.route('/api/databricks/test', methods=['GET'])
 def test_connections():
     """Test Databricks Platform, Unity Catalog tables, and Vector Search endpoint."""
@@ -162,7 +216,9 @@ def submit_feedback():
         if not question_id:
             return jsonify({"error": "question_id is required"}), 400
 
-        log_feedback(feedback_id, question_id, feedback_text, rating)
+        submit_async_db_logging([
+            (log_feedback, (feedback_id, question_id, feedback_text, rating))
+        ])
 
         return jsonify({
             "success": True,
@@ -425,7 +481,7 @@ def process_voice_turn():
             "error": str(e)
         }), 500
 
-@app.route('/api/config/info', methods=['GET'])
+
 def get_config_info():
     """Return non-sensitive configuration details for Admin Dashboard."""
     return jsonify({

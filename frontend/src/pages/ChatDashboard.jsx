@@ -401,16 +401,28 @@ export const ChatDashboard = ({ onNavigate }) => {
     }
 
     // Optimistic UI user message
+    const tempUserMsgId = `temp-${Date.now()}`;
     const tempUserMsg = {
-      id: `temp-${Date.now()}`,
+      id: tempUserMsgId,
       role: 'user',
       content: text,
       createdAt: new Date().toISOString()
     };
 
-    // Only add optimistic user message to view if still on this session
+    // Optimistic UI streaming assistant message
+    const streamingAssistantId = `streaming-${Date.now()}`;
+    const initialStreamingMsg = {
+      id: streamingAssistantId,
+      role: 'assistant',
+      content: '',
+      isStreaming: true,
+      modelUsed: selectedModel,
+      createdAt: new Date().toISOString()
+    };
+
+    // Only add optimistic messages to view if still on this session
     if (activeSessionIdRef.current === currSessionId) {
-      setMessages((prev) => [...prev, tempUserMsg]);
+      setMessages((prev) => [...prev, tempUserMsg, initialStreamingMsg]);
     }
 
     // Auto-detect Indic script (Telugu or Hindi) or Romanized keywords
@@ -435,82 +447,123 @@ export const ChatDashboard = ({ onNavigate }) => {
       }
     }
 
+    let accumulatedText = '';
+    const modelToUse = voiceMode === 'type2'
+      ? 'amazon.nova-2-5-sonic'
+      : (selectedModel === 'amazon.nova-2-5-sonic' ? (lastNormalModel || 'Auto') : selectedModel);
+    const isVoiceTurn = Boolean(isFromVoice || voiceMode === 'type2');
+
     try {
-      const modelToUse = voiceMode === 'type2'
-        ? 'amazon.nova-2-5-sonic'
-        : (selectedModel === 'amazon.nova-2-5-sonic' ? (lastNormalModel || 'Auto') : selectedModel);
-      const isVoiceTurn = Boolean(isFromVoice || voiceMode === 'type2');
-      const res = await chatAPI.sendQuery(currSessionId, text, modelToUse, numResults, effectiveLanguage, isVoiceTurn);
-      if (res.data?.success) {
-        const { assistantMessage, sessionTitle } = res.data;
-
-        // CRITICAL BUG FIX: Only inject response if citizen is STILL viewing this session!
-        if (activeSessionIdRef.current === currSessionId) {
-          setMessages((prev) => [
-            ...prev.filter((m) => m.id !== tempUserMsg.id),
-            res.data.userMessage,
-            assistantMessage
-          ]);
-        }
-
-        // Auto rename session from first question
-        if (sessionTitle) {
-          setSessions((prev) =>
-            prev.map((s) => (s.id === currSessionId ? { ...s, title: sessionTitle } : s))
+      await chatAPI.sendQueryStream(
+        currSessionId,
+        text,
+        modelToUse,
+        numResults,
+        effectiveLanguage,
+        isVoiceTurn,
+        // onToken callback: append incoming token immediately
+        (token) => {
+          if (activeSessionIdRef.current !== currSessionId) return;
+          accumulatedText += token;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === streamingAssistantId ? { ...m, content: accumulatedText } : m
+            )
           );
-        } else {
-          const currentSession = sessions.find((s) => s.id === currSessionId);
-          if (
-            currentSession &&
-            (currentSession.title.startsWith('New') ||
-             currentSession.title.startsWith('Inquiry #') ||
-             currentSession.title === 'Welcome Session')
-          ) {
-            const autoTitle = text.length > 36 ? `${text.slice(0, 33)}...` : text;
-            sessionAPI.renameSession(currSessionId, autoTitle);
-            setSessions((prev) =>
-              prev.map((s) => (s.id === currSessionId ? { ...s, title: autoTitle } : s))
-            );
-          }
-        }
+        },
+        // onDone callback: finalized payload
+        (donePayload) => {
+          if (activeSessionIdRef.current !== currSessionId) return;
+          const { assistantMessage, userMessage, sessionTitle } = donePayload;
 
-        // Voice handling (Only if currently in active session)
-        if (activeSessionIdRef.current === currSessionId) {
-          const isNova = selectedModel === 'amazon.nova-2-5-sonic' || (assistantMessage?.modelUsed || '').toLowerCase().includes('nova') || voiceMode === 'type2';
-          if (handsFreeActiveRef.current && assistantMessage?.content) {
-            // Type 2 Continuous Voice-to-Voice: speak answer aloud in matched language, then auto-listen again
-            setVoiceStatusNotice(effectiveLanguage === 'hi' ? '⏳ आवाज़ तैयार हो रही है...' : (effectiveLanguage === 'te' ? '⏳ ఆడియో సిద్ధమవుతోంది...' : '⏳ Preparing Amazon Nova 2.5 Sonic voice response...'));
-            voiceAssistant.speakMultilingual({
-              text: assistantMessage.content,
-              targetLanguage: effectiveLanguage,
-              preferredVoiceId: (isNova && effectiveLanguage === 'en') ? 'nova-sonic-voice' : selectedVoiceId,
-              audioBase64: assistantMessage?.audioBase64,
-              isNovaSonic: isNova,
-              onStart: () => {
-                setCurrentlySpeakingId(assistantMessage.id);
-                setVoiceStatusNotice(effectiveLanguage === 'hi' ? '🔊 सहायक उत्तर बोल रहा है...' : (effectiveLanguage === 'te' ? '🔊 సహాయకుడు సమాధానం చెబుతున్నాడు...' : '🔊 Amazon Nova 2.5 Sonic speaking response aloud...'));
-              },
-              onEnd: () => {
-                setCurrentlySpeakingId(null);
-                if (handsFreeActiveRef.current && activeSessionIdRef.current === currSessionId) {
-                  const notice = effectiveLanguage === 'hi' ? '🎙️ सुन रहा हूँ... अगला प्रश्न बोलिए' : (effectiveLanguage === 'te' ? '🎙️ వింటున్నాను... తర్వాతి ప్రశ్న మాట్లాడండి' : '🎙️ Nova Sonic listening... Speak your next question');
-                  setVoiceStatusNotice(notice);
-                  setTimeout(() => {
-                    if (handsFreeActiveRef.current && activeSessionIdRef.current === currSessionId) {
-                      startContinuousVoiceListen();
-                    }
-                  }, 350);
-                } else {
-                  setVoiceStatusNotice('');
+          const finalContent = assistantMessage?.content || accumulatedText;
+          const finalizedAsstMsg = {
+            ...assistantMessage,
+            content: finalContent,
+            isStreaming: false
+          };
+
+          // Replace temp messages with persistent records
+          setMessages((prev) => [
+            ...prev.filter((m) => m.id !== tempUserMsgId && m.id !== streamingAssistantId),
+            userMessage || { ...tempUserMsg, content: text },
+            finalizedAsstMsg
+          ]);
+
+          // Auto rename session from first question
+          if (sessionTitle) {
+            setSessions((prev) =>
+              prev.map((s) => (s.id === currSessionId ? { ...s, title: sessionTitle } : s))
+            );
+          } else {
+            const currentSession = sessions.find((s) => s.id === currSessionId);
+            if (
+              currentSession &&
+              (currentSession.title.startsWith('New') ||
+               currentSession.title.startsWith('Inquiry #') ||
+               currentSession.title === 'Welcome Session')
+            ) {
+              const autoTitle = text.length > 36 ? `${text.slice(0, 33)}...` : text;
+              sessionAPI.renameSession(currSessionId, autoTitle);
+              setSessions((prev) =>
+                prev.map((s) => (s.id === currSessionId ? { ...s, title: autoTitle } : s))
+              );
+            }
+          }
+
+          // Voice handling synchronized with completed text
+          if (activeSessionIdRef.current === currSessionId) {
+            const isNova = selectedModel === 'amazon.nova-2-5-sonic' || (assistantMessage?.modelUsed || '').toLowerCase().includes('nova') || voiceMode === 'type2';
+            if (handsFreeActiveRef.current && finalContent) {
+              // Type 2 Continuous Voice-to-Voice: speak answer aloud in matched language, then auto-listen again
+              setVoiceStatusNotice(effectiveLanguage === 'hi' ? '⏳ आवाज़ तैयार हो रही है...' : (effectiveLanguage === 'te' ? '⏳ ఆడియో సిద్ధమవుతోంది...' : '⏳ Preparing Amazon Nova 2.5 Sonic voice response...'));
+              voiceAssistant.speakMultilingual({
+                text: finalContent,
+                targetLanguage: effectiveLanguage,
+                preferredVoiceId: (isNova && effectiveLanguage === 'en') ? 'nova-sonic-voice' : selectedVoiceId,
+                audioBase64: assistantMessage?.audioBase64,
+                isNovaSonic: isNova,
+                onStart: () => {
+                  setCurrentlySpeakingId(assistantMessage.id);
+                  setVoiceStatusNotice(effectiveLanguage === 'hi' ? '🔊 सहायक उत्तर बोल रहा है...' : (effectiveLanguage === 'te' ? '🔊 సహాయకుడు సమాధానం చెబుతున్నాడు...' : '🔊 Amazon Nova 2.5 Sonic speaking response aloud...'));
+                },
+                onEnd: () => {
+                  setCurrentlySpeakingId(null);
+                  if (handsFreeActiveRef.current && activeSessionIdRef.current === currSessionId) {
+                    const notice = effectiveLanguage === 'hi' ? '🎙️ सुन रहा हूँ... अगला प्रश्न बोलिए' : (effectiveLanguage === 'te' ? '🎙️ వింటున్నాను... తర్వాతి ప్రశ్న మాట్లాడండి' : '🎙️ Nova Sonic listening... Speak your next question');
+                    setVoiceStatusNotice(notice);
+                    setTimeout(() => {
+                      if (handsFreeActiveRef.current && activeSessionIdRef.current === currSessionId) {
+                        startContinuousVoiceListen();
+                      }
+                    }, 350);
+                  } else {
+                    setVoiceStatusNotice('');
+                  }
                 }
+              });
+            } else if ((isFromVoice || autoSpeakAnswers) && finalContent) {
+              // Type 1 Push-to-Talk OR Voice Out: speak answer aloud in synchronized, matched language
+              playVoiceResponse(assistantMessage.id, finalContent, assistantMessage?.audioBase64, assistantMessage?.modelUsed);
+            }
+          }
+        },
+        // onError callback
+        (streamErr) => {
+          console.warn('[SSE STREAM NOTICE]', streamErr);
+          if (activeSessionIdRef.current === currSessionId) {
+            setMessages((prev) => [
+              ...prev.filter((m) => m.id !== streamingAssistantId),
+              {
+                id: `err-${Date.now()}`,
+                role: 'assistant',
+                content: accumulatedText ? `${accumulatedText}\n\n⚠️ (Stream paused)` : '⚠️ We encountered an issue communicating with the AI pipeline. Please try again.',
+                createdAt: new Date().toISOString()
               }
-            });
-          } else if ((isFromVoice || autoSpeakAnswers) && assistantMessage?.content) {
-            // Type 1 Push-to-Talk OR Voice Out: speak answer aloud in synchronized, matched language
-            playVoiceResponse(assistantMessage.id, assistantMessage.content, assistantMessage?.audioBase64, assistantMessage?.modelUsed);
+            ]);
           }
         }
-      }
+      );
     } catch (err) {
       console.error('Chat query error:', err);
       if (activeSessionIdRef.current === currSessionId) {
@@ -1606,7 +1659,10 @@ export const ChatDashboard = ({ onNavigate }) => {
                           marginBottom: '12px'
                         }}
                       >
-                        {msg.content}
+                        {msg.content || (msg.isStreaming ? '⚡ Generating answer...' : '')}
+                        {msg.isStreaming && (
+                          <span style={{ display: 'inline-block', width: '7px', height: '14px', marginLeft: '4px', background: '#38bdf8', verticalAlign: 'middle', borderRadius: '1px', opacity: 0.85 }}></span>
+                        )}
                       </div>
                     );
                   })()}

@@ -8,6 +8,7 @@ router.use(authenticate);
 
 // Send text query or transcribed voice turn
 router.post('/query', chatController.sendQuery);
+router.post('/query-stream', chatController.sendQueryStream);
 
 // Submit feedback rating (1-5 stars) linked to questionId
 router.post('/feedback', chatController.submitFeedback);

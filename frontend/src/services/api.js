@@ -58,6 +58,58 @@ export const sessionAPI = {
 export const chatAPI = {
   sendQuery: (sessionId, query, model, numResults, targetLanguage = 'en', isVoice = false) =>
     api.post('/chat/query', { sessionId, query, model, numResults, targetLanguage, isVoice }),
+  sendQueryStream: async (sessionId, query, model, numResults, targetLanguage = 'en', isVoice = false, onToken, onDone, onError) => {
+    const token = localStorage.getItem('gov_rag_jwt_token');
+    try {
+      const response = await fetch('/api/chat/query-stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ sessionId, query, model, numResults, targetLanguage, isVoice })
+      });
+
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.error || `HTTP error ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const jsonStr = trimmed.replace(/^data:\s*/, '');
+          try {
+            const parsed = JSON.parse(jsonStr);
+            const { event, data } = parsed;
+            if (event === 'token' && onToken) {
+              onToken(data.token);
+            } else if (event === 'done' && onDone) {
+              onDone(data);
+            } else if (event === 'error' && onError) {
+              onError(data.error);
+            }
+          } catch (e) {
+            console.warn('[CLIENT SSE PARSE NOTICE]', e);
+          }
+        }
+      }
+    } catch (err) {
+      if (onError) onError(err.message || 'Stream connection error');
+      throw err;
+    }
+  },
   submitFeedback: (questionId, rating, feedbackText, sessionId) =>
     api.post('/chat/feedback', { questionId, rating, feedbackText, sessionId }),
   synthesizeSpeech: (text, targetLanguage = 'en', voiceGender = 'Female', isNovaSonic = false) =>
